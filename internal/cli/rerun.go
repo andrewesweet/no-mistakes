@@ -20,7 +20,7 @@ func newRerunCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rerun",
 		Short: "Rerun the pipeline for the current branch",
-		Long:  "Rerun the pipeline for the current branch. By default, an explicit intent from the selected prior run is inherited; otherwise intent is inferred afresh. Use --intent to replace either with a new explicit intent. A per-run PR base branch is inherited from the selected prior run unless --base-branch is set. Publication of the generated Intent section is inherited from the selected prior run; --no-publish-intent keeps it out of the PR body for this rerun (tighten-only; the full intent still reaches step prompts). The selected run's pull-request URL is inherited when that PR is not already merged or closed, so retarget can prove identity. --model/--effort select a new immutable Pi profile (see axi run --help); a rerun is a NEW run and does not inherit the prior model pin. Without these flags it uses global configuration.",
+		Long:  "Rerun the pipeline for the current branch. By default, an explicit intent from the selected prior run is inherited; otherwise intent is inferred afresh. Use --intent to replace either with a new explicit intent. A per-run PR base branch is inherited from the selected prior run unless --base-branch is set. Omission of the generated Intent section is inherited from the selected prior run; --no-publish-intent additionally keeps it out of the PR body for this rerun (tighten-only; the full intent still reaches step prompts). The selected run's pull-request URL is inherited when that PR is not already merged or closed, so retarget can prove identity. --model/--effort select a new immutable Pi profile (see axi run --help); a rerun is a NEW run and does not inherit the prior model pin. Without these flags it uses global configuration.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Flags().Changed("intent") && strings.TrimSpace(intent) == "" {
@@ -73,12 +73,8 @@ func newRerunCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				var omit *bool
-				if cmd.Flags().Changed("no-publish-intent") {
-					omit = &noPublishIntent
-				}
 				var result ipc.RerunResult
-				if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: branch, Intent: intent, PRBaseBranch: baseBranch, OmitIntent: omit, CallerHeadSHA: callerHead, PiProfile: profile}, &result); err != nil {
+				if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: branch, Intent: intent, PRBaseBranch: baseBranch, OmitIntent: noPublishIntent, CallerHeadSHA: callerHead, PiProfile: profile}, &result); err != nil {
 					return fmt.Errorf("rerun pipeline: %w", err)
 				}
 
@@ -89,7 +85,7 @@ func newRerunCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&intent, "intent", "", "explicit intent for this rerun (overrides inherited intent or fresh inference)")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch for the PR for this rerun only (overrides inherited per-run base branch)")
-	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this rerun (overrides inheritance; tighten-only)")
+	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this rerun (adds to the inherited decision; tighten-only)")
 	bindPiProfileFlags(cmd, &model, &effort)
 	return cmd
 }

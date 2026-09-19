@@ -450,9 +450,9 @@ If the selected prior run has explicit intent, rerun inherits it exactly by defa
 otherwise it performs fresh intent inference. `--intent` supplies a new canonical
 explicit intent in either case. Inherited intent keeps distinct rerun provenance;
 an override is recorded as newly supplied explicit intent, while fresh inference
-records the transcript source. Publication of the generated Intent section is
-inherited from the selected prior run unless `--no-publish-intent` is set; the
-global [`intent.publish_intent`](/no-mistakes/reference/global-config/#intent)
+records the transcript source. Omission of the generated Intent section is always
+inherited from the selected prior run; `--no-publish-intent` and the global
+[`intent.publish_intent`](/no-mistakes/reference/global-config/#intent)
 default can only add omission, never remove it. If another run is active on that branch, rerun
 cancels it before starting over. Treat rerun as a between-runs action after a
 failed or cancelled outcome; use `axi run` for separate local fixes, and do not
@@ -461,7 +461,7 @@ use rerun to bypass a gate.
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `--intent` | `string` | (none) | Explicit intent overriding inherited intent or fresh inference |
-| `--no-publish-intent` | `bool` | `false` | Keep the generated `## Intent` section out of the PR body for this rerun (overrides inheritance; tighten-only) |
+| `--no-publish-intent` | `bool` | `false` | Keep the generated `## Intent` section out of the PR body for this rerun (adds to the inherited decision; tighten-only) |
 | `--model` | `string` | (none) | Pi provider/model ID for an immutable [per-run profile](/no-mistakes/reference/global-config/#per-run-pi-profiles) |
 | `--effort` | `string` | (none) | Pi reasoning effort for that profile; omitted fields inherit `agent_config.pi` |
 

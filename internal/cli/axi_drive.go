@@ -628,11 +628,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []typ
 	// clean-head evidence because it may have changed while waiting above.
 	var rr ipc.RerunResult
 	params := rerunParams(env.repo.ID, branch, skipSteps, intent, baseBranch)
-	// False is the neutral value (inherit), same as absent on the wire, so
-	// only a true request is serialized.
-	if omitIntent {
-		params.OmitIntent = &omitIntent
-	}
+	params.OmitIntent = omitIntent
 	params.PiProfile = profile
 	params.CallerHeadSHA, err = rerunCallerHead(ctx)
 	if err != nil {

@@ -184,8 +184,9 @@ type RerunParams struct {
 	Intent        string           `json:"intent,omitempty"`
 	PRBaseBranch  string           `json:"pr_base_branch,omitempty"`
 	// OmitIntent requests omission of the public Intent section for the new
-	// run; nil inherits the selected prior run's decision.
-	OmitIntent *bool `json:"omit_intent,omitempty"`
+	// run. It is tighten-only: the selected prior run's decision is always
+	// inherited and this can only add to it.
+	OmitIntent bool `json:"omit_intent,omitempty"`
 	// CallerHeadSHA is a clean caller worktree's HEAD, when known. It guards
 	// the daemon's selected head; it never supplies a replacement run head.
 	CallerHeadSHA string `json:"caller_head_sha,omitempty"`

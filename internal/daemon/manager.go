@@ -1030,7 +1030,7 @@ func receiptForRun(run *db.Run, created bool) (ipc.LaunchReceipt, error) {
 // retarget can prove it is moving the same still-open review object.
 // A supplied clean caller head must match the selected head before any run
 // starts or is superseded. It never changes head selection.
-func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prBaseBranch string, omitIntent *bool, callerHeadSHA string, profiles ...*agentcfg.PiProfile) (string, error) {
+func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prBaseBranch string, omitIntent bool, callerHeadSHA string, profiles ...*agentcfg.PiProfile) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -1107,15 +1107,11 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	if storedPRBaseBranch == "" && selectedRun.PRBaseBranch != nil {
 		storedPRBaseBranch = strings.TrimSpace(*selectedRun.PRBaseBranch)
 	}
-	// Publication omission inherits like the PR target: the selected run's
-	// decision stands unless this rerun explicitly requests it. Either way the
-	// locked start still folds in the operator's live global default, which
-	// can only add omission, never remove it.
-	storedOmitIntent := selectedRun.OmitIntent
-	if omitIntent != nil {
-		storedOmitIntent = *omitIntent
-	}
-	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, storedOmitIntent, inheritablePRURL(selectedRun), profiles...)
+	// Publication omission is tighten-only on rerun as everywhere else: the
+	// selected run's decision is inherited and this rerun can only add to it.
+	// The locked start then folds in the operator's live global default, which
+	// likewise can only add omission, never remove it.
+	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, selectedRun.OmitIntent || omitIntent, inheritablePRURL(selectedRun), profiles...)
 }
 
 func inheritablePRURL(run *db.Run) string {
@@ -1307,17 +1303,19 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// agent selection is checked next because it can still replace that list
 	// with Claude or mixed fallbacks after merge.
 	//
-	// The global config also decides the caller-side omit-intent default, so
-	// it loads before the run row exists: the decision is stamped on the row
-	// at creation and recovery/reruns read that stamp back instead of
-	// re-reading a since-changed config file.
-	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
-	if err != nil {
-		trackStartFailure("load_global_config")
-		return "", fmt.Errorf("load global config: %w", err)
-	}
+	// The global config also decides the caller-side omit-intent default,
+	// which is stamped on the row at creation so recovery and reruns read the
+	// stamp back instead of a since-changed config file. Legacy launches keep
+	// their failed-row diagnostics on a bad global config: the load error is
+	// held until the row exists.
+	globalCfg, globalCfgErr := config.LoadGlobal(m.paths.ConfigFile())
 	var pin *agentcfg.PiProfile
 	if request := agentcfg.OptionalPiProfile(profiles); request != nil {
+		if globalCfgErr != nil {
+			trackStartFailure("load_global_config")
+			return "", fmt.Errorf("load global config: %w", globalCfgErr)
+		}
+		var err error
 		pin, err = globalCfg.ResolvePiProfile(request)
 		if err != nil {
 			trackStartFailure("invalid_pi_profile")
@@ -1353,7 +1351,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// and the operator's global tighten-only default. It is stamped here, at
 	// creation, and can only reduce publication: the repository's trusted
 	// pr.publish_intent is enforced independently by the PR step.
-	storedOmitIntent := omitIntent || !globalCfg.Intent.PublishesIntentByDefault()
+	storedOmitIntent := omitIntent || (globalCfg != nil && !globalCfg.Intent.PublishesIntentByDefault())
 
 	run, err := m.db.InsertRunWithIntentAndLaunchNonce(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch, storedOmitIntent, pin)
 	if err != nil {
@@ -1369,9 +1367,13 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		run.PRURL = &inherited
 	}
 
-	// The pipeline work below starts from here; the global config already
-	// loaded above (the omit-intent stamp and any Pi-profile resolution
-	// needed it before row creation).
+	// Legacy launches retain their existing failed-row diagnostics on a bad
+	// global config. Explicit profiles already resolved before supersession.
+	if globalCfgErr != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", globalCfgErr))
+		trackStartFailure("load_global_config")
+		return "", fmt.Errorf("load global config: %w", globalCfgErr)
+	}
 
 	// Create worktree from the gate bare repo, where this repository's
 	// worktree placement says it belongs (see internal/worktrees). This is the
