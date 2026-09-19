@@ -121,6 +121,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			omitIntent, err := parseOmitIntentPushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
 			piProfile, err := parsePiProfilePushOptions(pushOptions)
 			if err != nil {
 				return err
@@ -156,6 +160,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				LaunchNonce:            launchNonce,
 				ValidationGeneration:   validationGeneration,
 				PRBaseBranch:           prBaseBranch,
+				OmitIntent:             omitIntent,
 				PiProfile:              piProfile,
 				ReconciledPreviousHead: reconciledPreviousHead,
 			}, &result)
@@ -327,6 +332,32 @@ func parsePRBaseBranchPushOptions(options []string) (string, error) {
 		branch = value
 	}
 	return branch, nil
+}
+
+// omitIntentPushOption carries axi run --no-publish-intent through a git push.
+// Like every publication control it is tighten-only: the option can only ask
+// for omission, never for publication.
+const omitIntentPushOption = "no-mistakes.omit-intent"
+
+// formatOmitIntentPushOption encodes the caller-side omit-intent request as a
+// push option. An absent request formats to no option at all.
+func formatOmitIntentPushOption(omit bool) string {
+	if !omit {
+		return ""
+	}
+	return omitIntentPushOption
+}
+
+// parseOmitIntentPushOptions reports whether the push carried the omit-intent
+// request. Repetition is harmless; the value is boolean and tighten-only.
+func parseOmitIntentPushOptions(options []string) (bool, error) {
+	omit := false
+	for _, option := range options {
+		if option == omitIntentPushOption {
+			omit = true
+		}
+	}
+	return omit, nil
 }
 
 // reconciledPreviousHeadPushOptionPrefix carries the pre-reconciliation private

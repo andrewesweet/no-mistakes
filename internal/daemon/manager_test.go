@@ -924,6 +924,111 @@ func TestRerunInheritsPRBaseBranchFromSelectedRun(t *testing.T) {
 	}
 }
 
+// The omit-intent decision folds once at run start: the caller's tighten-only
+// request OR the operator's global intent.publish_intent default, stamped on
+// the run row at creation. Reruns inherit the selected run's decision unless
+// explicitly overridden, so a since-changed config file never re-publishes
+// mid-run or on rerun.
+func TestOmitIntentFoldsAtRunStartAndRerunInherits(t *testing.T) {
+	step := &mockPassStep{name: types.StepReview}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{step}
+	})
+
+	_, headSHA := setupTestGitRepo(t, p, d, "omit-intent-repo")
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	push := func(omit bool) string {
+		t.Helper()
+		var result ipc.PushReceivedResult
+		err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+			Gate:       p.RepoDir("omit-intent-repo"),
+			Ref:        "refs/heads/main",
+			Old:        "0000000000000000000000000000000000000000",
+			New:        headSHA,
+			OmitIntent: omit,
+		}, &result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.RunID
+	}
+
+	firstID := push(false)
+	first := waitForRunTerminalState(t, d, firstID)
+	if first.OmitIntent {
+		t.Fatal("run without flag or global default must not omit")
+	}
+
+	secondID := push(true)
+	second := waitForRunTerminalState(t, d, secondID)
+	if !second.OmitIntent {
+		t.Fatal("flagged run must omit")
+	}
+
+	// Rerun inherits the selected run's decision.
+	var rerun ipc.RerunResult
+	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: "omit-intent-repo", Branch: "main", PreviousRunID: second.ID}, &rerun); err != nil {
+		t.Fatal(err)
+	}
+	inherited := waitForRunTerminalState(t, d, rerun.RunID)
+	if !inherited.OmitIntent {
+		t.Fatal("rerun must inherit the selected run's omit decision")
+	}
+
+	// An explicit rerun request can also raise omission on demand.
+	var rerunFlagged ipc.RerunResult
+	omit := true
+	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: "omit-intent-repo", Branch: "main", PreviousRunID: first.ID, OmitIntent: &omit}, &rerunFlagged); err != nil {
+		t.Fatal(err)
+	}
+	flagged := waitForRunTerminalState(t, d, rerunFlagged.RunID)
+	if !flagged.OmitIntent {
+		t.Fatal("rerun with explicit omit must stamp it")
+	}
+}
+
+// The operator's global intent.publish_intent: false is folded in at start:
+// runs started without any flag omit the public Intent section.
+func TestGlobalPublishIntentFalseStampsRuns(t *testing.T) {
+	step := &mockPassStep{name: types.StepReview}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{step}
+	})
+	globalConfig, err := os.ReadFile(p.ConfigFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.ConfigFile(), append([]byte("intent:\n  publish_intent: false\n"), globalConfig...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, headSHA := setupTestGitRepo(t, p, d, "global-omit-repo")
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var first ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate: p.RepoDir("global-omit-repo"),
+		Ref:  "refs/heads/main",
+		Old:  "0000000000000000000000000000000000000000",
+		New:  headSHA,
+	}, &first); err != nil {
+		t.Fatal(err)
+	}
+	run := waitForRunTerminalState(t, d, first.RunID)
+	if !run.OmitIntent {
+		t.Fatal("global intent.publish_intent: false must stamp omit on the run")
+	}
+}
+
 func TestRerunInheritsPRURLFromSelectedRun(t *testing.T) {
 	step := &mockPassStep{name: types.StepReview}
 	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {

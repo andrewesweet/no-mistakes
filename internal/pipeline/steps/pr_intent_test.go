@@ -13,6 +13,52 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
+func TestPROmitIntentSuppressionIsTightenOnly(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name           string
+		runOmitIntent  bool
+		repoPolicy     string
+		wantIntSection bool
+	}{
+		// Without the stamp the repository's trusted policy alone decides.
+		{name: "default publishes", runOmitIntent: false, repoPolicy: "pr: {}", wantIntSection: true},
+		// The run stamp removes the section even where the repo publishes.
+		{name: "run stamp removes", runOmitIntent: true, repoPolicy: "pr: {}", wantIntSection: false},
+		{name: "run stamp removes with repo publish", runOmitIntent: true, repoPolicy: "pr: {publish_intent: true}", wantIntSection: false},
+		// The repository's trusted ceiling is untouched by anything else.
+		{name: "trusted ceiling wins", runOmitIntent: false, repoPolicy: "pr: {publish_intent: false}", wantIntSection: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				return &agent.Result{Output: json.RawMessage(`{"title":"feat: helper","body":"## What Changed\n\n- A helper."}`)}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+			sctx.Run.OmitIntent = tc.runOmitIntent
+			trusted, err := config.LoadRepoFromBytes([]byte(tc.repoPolicy))
+			if err != nil {
+				t.Fatal(err)
+			}
+			sctx.Config.PR = config.Merge(config.DefaultGlobalConfig(), config.EffectiveRepoConfig(nil, trusted, false)).PR
+			sctx.UserIntent = "Entire original intent remains reviewer input."
+			got, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", base, scm.ProviderGitHub, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(got.Body, "## Intent") != tc.wantIntSection {
+				t.Fatalf("runOmit=%v policy=%s: body has Intent section = %v, want %v:\n%s", tc.runOmitIntent, tc.repoPolicy, !tc.wantIntSection, tc.wantIntSection, got.Body)
+			}
+			if !strings.Contains(got.Body, "## What Changed") {
+				t.Fatalf("body lost its main section:\n%s", got.Body)
+			}
+			if !strings.Contains(ag.calls[len(ag.calls)-1].Prompt, sctx.UserIntent) {
+				t.Fatal("suppression removed full intent from model context")
+			}
+		})
+	}
+}
+
 func TestPRPublishIntentSuppressionCoversDefaultAgentAndFallback(t *testing.T) {
 	t.Parallel()
 	no, yes := false, true
