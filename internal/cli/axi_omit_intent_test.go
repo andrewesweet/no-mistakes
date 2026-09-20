@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -152,31 +153,77 @@ func olderDaemonFixture(t *testing.T, probe func() (interface{}, error)) (launch
 }
 
 func TestAxiRunNoPublishIntentRefusesOlderDaemon(t *testing.T) {
-	for _, tc := range []struct {
+	probes := []struct {
 		name  string
 		probe func() (interface{}, error)
 	}{
 		{name: "probe method unknown", probe: nil},
 		{name: "probe declined", probe: func() (interface{}, error) { return &ipc.ProbeOmitIntentResult{OK: false}, nil }},
 		{name: "probe undecodable", probe: func() (interface{}, error) { return json.RawMessage(`"yes"`), nil }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			launched := olderDaemonFixture(t, tc.probe)
-			var out bytes.Buffer
-			cmd := &cobra.Command{}
-			cmd.SetContext(context.Background())
-			cmd.SetOut(&out)
-			err := runAxiRunWithLaunchProof(cmd, false, nil, "private goal", "", true, "", "", defaultAxiWait)
-			if err == nil {
-				t.Fatalf("axi run --no-publish-intent should refuse an older daemon:\n%s", out.String())
-			}
-			if !strings.Contains(out.String(), "too old to honor --no-publish-intent") {
-				t.Fatalf("output should name the daemon capability, got:\n%s", out.String())
-			}
-			if len(*launched) != 0 {
-				t.Fatalf("run was started on a daemon that would publish the intent: %v", *launched)
-			}
-		})
+	}
+	// Omission can be requested by the flag or by the local global default,
+	// and an unreadable global config cannot rule it out; every path must
+	// reach the probe and refuse the older daemon.
+	requests := []struct {
+		name         string
+		flag         bool
+		globalConfig string
+	}{
+		{name: "flag", flag: true},
+		{name: "global default false", globalConfig: "intent:\n  publish_intent: false\n"},
+		{name: "global config unreadable", globalConfig: "intent: [\n"},
+	}
+	for _, rq := range requests {
+		for _, tc := range probes {
+			t.Run(rq.name+"/"+tc.name, func(t *testing.T) {
+				launched := olderDaemonFixture(t, tc.probe)
+				writeGlobalConfig(t, rq.globalConfig)
+				var out bytes.Buffer
+				cmd := &cobra.Command{}
+				cmd.SetContext(context.Background())
+				cmd.SetOut(&out)
+				err := runAxiRunWithLaunchProof(cmd, false, nil, "private goal", "", rq.flag, "", "", defaultAxiWait)
+				if err == nil {
+					t.Fatalf("axi run should refuse an older daemon when omission may apply:\n%s", out.String())
+				}
+				if !strings.Contains(out.String(), "too old to honor --no-publish-intent") {
+					t.Fatalf("output should name the daemon capability, got:\n%s", out.String())
+				}
+				if len(*launched) != 0 {
+					t.Fatalf("run was started on a daemon that would publish the intent: %v", *launched)
+				}
+			})
+		}
+	}
+}
+
+// TestAxiRunPublishingRunReusesOlderDaemon pins the only case that skips the
+// probe: nothing requested omission (flag unset, global default true), so an
+// older daemon can still serve a publishing run.
+func TestAxiRunPublishingRunReusesOlderDaemon(t *testing.T) {
+	olderDaemonFixture(t, nil)
+	writeGlobalConfig(t, "intent:\n  publish_intent: true\n")
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&out)
+	_ = runAxiRunWithLaunchProof(cmd, false, nil, "public goal", "", false, "", "", defaultAxiWait)
+	if strings.Contains(out.String(), "too old to honor --no-publish-intent") {
+		t.Fatalf("publishing run was refused on an older daemon:\n%s", out.String())
+	}
+}
+
+func writeGlobalConfig(t *testing.T, yaml string) {
+	t.Helper()
+	if yaml == "" {
+		return
+	}
+	p, err := paths.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.ConfigFile(), []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

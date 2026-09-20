@@ -227,8 +227,13 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 	defer env.close()
 	// Probe before any RPC carries omit_intent: an older daemon would drop
 	// the unknown field silently and publish the intent it was asked to
-	// withhold, so the run is refused instead.
-	if err := requireDaemonHonorsOmitIntent(env.client, omitIntent); err != nil {
+	// withhold, so the run is refused instead. An unreadable global config
+	// (env.cfg holds defaults) cannot rule omission out, so it probes too.
+	globalCfg := env.cfg
+	if env.globalConfigErr != nil {
+		globalCfg = nil
+	}
+	if err := requireDaemonHonorsOmitIntent(env.client, omitIntent, globalCfg); err != nil {
 		return emitError(cmd, 2, err.Error())
 	}
 

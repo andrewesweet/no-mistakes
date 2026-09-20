@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -58,7 +59,9 @@ func newRerunCmd() *cobra.Command {
 					return fmt.Errorf("connect to daemon: %w", err)
 				}
 				defer client.Close()
-				if err := requireDaemonHonorsOmitIntent(client, noPublishIntent); err != nil {
+				// A nil global config (unreadable) cannot rule omission out.
+				globalCfg, _ := config.LoadGlobal(p.ConfigFile())
+				if err := requireDaemonHonorsOmitIntent(client, noPublishIntent, globalCfg); err != nil {
 					return err
 				}
 				if profile != nil {

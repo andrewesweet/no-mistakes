@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/gatecontext"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -361,14 +362,18 @@ func parseOmitIntentPushOptions(options []string) (bool, error) {
 	return omit, nil
 }
 
-// requireDaemonHonorsOmitIntent probes the running daemon before
-// --no-publish-intent is forwarded on any RPC. Daemon requests decode JSON
-// permissively, so a reused older daemon would silently ignore the unknown
-// omit_intent field and publish the intent it was asked to withhold. The
-// probe is a distinct method that such a daemon refuses; any failure or a
-// non-OK answer refuses the request, never falls back to publishing.
-func requireDaemonHonorsOmitIntent(client *ipc.Client, omit bool) error {
-	if !omit {
+// requireDaemonHonorsOmitIntent probes the running daemon before any RPC
+// that may start an omitting run. Daemon requests decode JSON permissively,
+// so a reused older daemon would silently ignore the unknown omit_intent
+// field and publish the intent it was asked to withhold; it would likewise
+// never read the global `intent.publish_intent: false` default that only the
+// daemon folds into the run. Omission may apply when the flag is set or the
+// local global default is false; global is nil when the file is unreadable,
+// which counts as may-omit. The probe is a distinct method that such a daemon
+// refuses; any failure or a non-OK answer refuses the request, never falls
+// back to publishing. Only a request that cannot omit skips the probe.
+func requireDaemonHonorsOmitIntent(client *ipc.Client, omit bool, global *config.GlobalConfig) error {
+	if !omit && global != nil && global.Intent.PublishesIntentByDefault() {
 		return nil
 	}
 	var result ipc.ProbeOmitIntentResult
