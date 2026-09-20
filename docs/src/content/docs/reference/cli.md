@@ -145,6 +145,8 @@ Ordinary reattachment to an in-flight run does not require `--intent`; [strict l
 `--base-branch` is persisted on the run so rebase, PR, and CI honor it after resume.
 Reattaching with a `--base-branch` that differs from the active run's stored target is refused rather than silently discarded; omit the flag to reattach, or abort the active run first.
 `--no-publish-intent` is likewise persisted on the run, and reattaching with it against an active run started without it is refused rather than silently discarded; omit the flag to reattach, or abort the active run first.
+Before forwarding it, `axi run` probes the running daemon for the capability and refuses to start anything when that daemon is too old to honor it (an older daemon would silently drop the field and publish); restart the daemon with the current binary or omit the flag.
+Under the flag the PR-drafting turns receive no intent text at all and draft from the diff and commit messages only; every other step prompt keeps the full intent.
 The same omit-to-reattach rule applies to `--model`/`--effort` against an active run's [pinned Pi profile](/no-mistakes/reference/global-config/#per-run-pi-profiles); a different selection cannot change that pin.
 Ordinary reattachment accepts either the run's immutable submitted head or its current pipeline head, so pipeline-created fix commits do not detach an unchanged submitting worktree.
 When neither identity matches, `axi run` keeps the fresh-run path but refuses a gate push while `branch_sync` says the pipeline still owns the branch.

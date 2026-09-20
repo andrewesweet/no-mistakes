@@ -1274,6 +1274,11 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return &ipc.ClaimLaunchReceiptResult{Receipt: &receipt}, nil
 	})
 
+	// Capability probe for --no-publish-intent: see ipc.ProbeOmitIntentResult.
+	srv.Handle(ipc.MethodProbeOmitIntent, func(context.Context, json.RawMessage) (interface{}, error) {
+		return &ipc.ProbeOmitIntentResult{OK: true}, nil
+	})
+
 	srv.Handle(ipc.MethodResolvePiProfile, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		var request agentcfg.PiProfile
 		if err := json.Unmarshal(params, &request); err != nil {

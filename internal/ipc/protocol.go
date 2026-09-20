@@ -12,6 +12,7 @@ import (
 const (
 	MethodPushReceived       = "push_received"
 	MethodResolvePiProfile   = "resolve_pi_profile"
+	MethodProbeOmitIntent    = "probe_omit_intent"
 	MethodStartFreshRun      = "start_fresh_run"
 	MethodClaimLaunchReceipt = "claim_launch_receipt"
 	MethodGetRun             = "get_run"
@@ -108,6 +109,19 @@ type StartFreshRunParams struct {
 	ValidationGeneration string           `json:"validation_generation"`
 	PRBaseBranch         string           `json:"pr_base_branch,omitempty"`
 	OmitIntent           bool             `json:"omit_intent,omitempty"`
+}
+
+// ProbeOmitIntentParams is the empty request for MethodProbeOmitIntent.
+type ProbeOmitIntentParams struct{}
+
+// ProbeOmitIntentResult answers MethodProbeOmitIntent. The method exists only
+// as a capability check: daemon requests decode JSON permissively, so an older
+// daemon would silently drop the unknown omit_intent field from an existing
+// RPC and publish the intent the caller asked it to withhold. A distinct method
+// is refused by such a daemon (method not found) instead of succeeding
+// silently, so a client that reaches OK=true knows omit_intent is honored.
+type ProbeOmitIntentResult struct {
+	OK bool `json:"ok"`
 }
 
 // ClaimLaunchReceiptParams identifies one exact opaque receipt binding.

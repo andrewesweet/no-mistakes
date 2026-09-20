@@ -134,23 +134,31 @@ func TestOmitIntentJourney(t *testing.T) {
 		t.Logf("PR body for %s (run %s, omit_intent=%v):\n%s", run.Branch, run.ID, run.OmitIntent, prBody)
 		return prBody
 	}
+	// promptsCarry proves the omission changes only publication for the
+	// review prompt, which keeps the full intent, while the PR-drafting turn
+	// is withheld the intent entirely so no paraphrase can reach the PR.
 	promptsCarry := func(intent string) {
 		t.Helper()
 		invocations := h.AgentInvocations()
-		for _, marker := range []string{
-			"Review the code changes and return structured findings",
-			"Draft a pull request title and summary for the full branch delta.",
-		} {
-			var found bool
-			for _, inv := range invocations {
-				if strings.Contains(inv.Prompt, marker) && strings.Contains(inv.Prompt, intent) {
-					found = true
-					break
+		const reviewMarker = "Review the code changes and return structured findings"
+		const draftMarker = "Draft a pull request title and summary for the full branch delta."
+		var reviewCarried, drafted bool
+		for _, inv := range invocations {
+			if strings.Contains(inv.Prompt, reviewMarker) && strings.Contains(inv.Prompt, intent) {
+				reviewCarried = true
+			}
+			if strings.Contains(inv.Prompt, draftMarker) {
+				drafted = true
+				if strings.Contains(inv.Prompt, intent) {
+					t.Errorf("PR-drafting prompt received the withheld intent %q", intent)
 				}
 			}
-			if !found {
-				t.Errorf("no %q prompt carried the full intent %q", marker, intent)
-			}
+		}
+		if !reviewCarried {
+			t.Errorf("no review prompt carried the full intent %q", intent)
+		}
+		if !drafted {
+			t.Errorf("no PR-drafting prompt ran")
 		}
 	}
 

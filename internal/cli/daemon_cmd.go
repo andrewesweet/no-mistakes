@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -358,6 +359,27 @@ func parseOmitIntentPushOptions(options []string) (bool, error) {
 		}
 	}
 	return omit, nil
+}
+
+// requireDaemonHonorsOmitIntent probes the running daemon before
+// --no-publish-intent is forwarded on any RPC. Daemon requests decode JSON
+// permissively, so a reused older daemon would silently ignore the unknown
+// omit_intent field and publish the intent it was asked to withhold. The
+// probe is a distinct method that such a daemon refuses; any failure or a
+// non-OK answer refuses the request, never falls back to publishing.
+func requireDaemonHonorsOmitIntent(client *ipc.Client, omit bool) error {
+	if !omit {
+		return nil
+	}
+	var result ipc.ProbeOmitIntentResult
+	err := client.Call(ipc.MethodProbeOmitIntent, &ipc.ProbeOmitIntentParams{}, &result)
+	if err == nil && !result.OK {
+		err = errors.New("daemon declined the omit-intent capability")
+	}
+	if err != nil {
+		return fmt.Errorf("the running daemon is too old to honor --no-publish-intent (%v); restart it with `no-mistakes daemon restart` so the current binary serves it", err)
+	}
+	return nil
 }
 
 // reconciledPreviousHeadPushOptionPrefix carries the pre-reconciliation private

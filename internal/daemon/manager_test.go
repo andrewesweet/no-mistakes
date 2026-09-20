@@ -926,9 +926,9 @@ func TestRerunInheritsPRBaseBranchFromSelectedRun(t *testing.T) {
 
 // The omit-intent decision folds once at run start: the caller's tighten-only
 // request OR the operator's global intent.publish_intent default, stamped on
-// the run row at creation. Reruns inherit the selected run's decision unless
-// explicitly overridden, so a since-changed config file never re-publishes
-// mid-run or on rerun.
+// the run row at creation. Reruns inherit the selected run's decision and can
+// only add omission (rerun --no-publish-intent), never remove it, so a
+// since-changed config file never re-publishes mid-run or on rerun.
 func TestOmitIntentFoldsAtRunStartAndRerunInherits(t *testing.T) {
 	step := &mockPassStep{name: types.StepReview}
 	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {

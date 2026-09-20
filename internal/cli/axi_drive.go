@@ -150,9 +150,11 @@ func newAxiRunCmd() *cobra.Command {
 			"in repo config and is persisted on the run for rebase, PR, and CI steps.\n\n" +
 			"--no-publish-intent keeps the generated public Intent section out of the\n" +
 			"PR body for this run. It is tighten-only: it can never publish intent on a\n" +
-			"repository whose trusted pr.publish_intent disabled it, and the full intent\n" +
-			"still reaches every step prompt. It is persisted on the run; the global\n" +
-			"intent.publish_intent: false default applies to runs started without it.\n\n" +
+			"repository whose trusted pr.publish_intent disabled it. The full intent\n" +
+			"still reaches every step prompt except the PR-drafting turns, which then\n" +
+			"draft from the diff and commit messages only. It is persisted on the run;\n" +
+			"the global intent.publish_intent: false default applies to runs started\n" +
+			"without it. The running daemon must honor it; an older daemon is refused.\n\n" +
 			"--model and/or --effort opt into an immutable Pi profile for a new run.\n" +
 			"An omitted field comes from agent_config.pi; both must resolve. Requires\n" +
 			"Pi-only agents; raw native selection flags conflict. The pin outranks\n" +
@@ -194,7 +196,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&launchNonce, "launch-nonce", "", "opaque nonce for a daemon-bound pre-drive launch receipt")
 	cmd.Flags().StringVar(&validationGeneration, "validation-generation", "", "opaque generation bound to --launch-nonce proof mode")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch to open the PR against for this run only (overrides pr.base_branch)")
-	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this run (tighten-only; full intent still reaches step prompts)")
+	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this run (tighten-only; full intent still reaches every step prompt except PR drafting)")
 	bindAxiWaitFlag(cmd, &wait)
 	bindPiProfileFlags(cmd, &model, &effort)
 	return cmd
@@ -223,6 +225,12 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
 	}
 	defer env.close()
+	// Probe before any RPC carries omit_intent: an older daemon would drop
+	// the unknown field silently and publish the intent it was asked to
+	// withhold, so the run is refused instead.
+	if err := requireDaemonHonorsOmitIntent(env.client, omitIntent); err != nil {
+		return emitError(cmd, 2, err.Error())
+	}
 
 	branch, err := git.CurrentBranch(ctx, ".")
 	if err != nil {

@@ -20,9 +20,13 @@ import (
 //     intent.publish_intent: false default, folded together at run start)
 //     can only remove the section, never restore it.
 //
-// Neither signal touches the intent that reaches step prompts: review, test,
-// document, lint, CI-fix, and PR-drafting prompts read cleanedUserIntent
-// directly and keep the full text either way.
+// The repository policy never touches the intent that reaches step prompts.
+// The caller-side omission is different: it also WITHHOLDS the intent from the
+// PR-drafting turns (prDraftIntentPromptSection), because a PR title or body
+// drafted with the intent in context can paraphrase it into the public text,
+// and there is deliberately no output filter or prose scanner to catch that.
+// Review, test, document, lint, and CI-fix prompts keep the full intent
+// under either signal.
 func publicPRIntent(sctx *pipeline.StepContext) string {
 	if sctx != nil && sctx.Config != nil && !sctx.Config.PR.PublishesIntent() {
 		return ""
@@ -39,4 +43,17 @@ func publicPRIntent(sctx *pipeline.StepContext) string {
 // daemon restarts and reruns.
 func runOmitsIntent(sctx *pipeline.StepContext) bool {
 	return sctx != nil && sctx.Run != nil && sctx.Run.OmitIntent
+}
+
+// prDraftIntentPromptSection is the intent section for the PR-drafting turns
+// (ordinary narrative, title-only fallback, and repository-template
+// narrative). Under the caller-side omission it is empty, so those turns
+// draft from the diff and commit messages only and no intent text can reach
+// the public PR through a paraphrase. Every other step prompt keeps
+// userIntentPromptSection unchanged.
+func prDraftIntentPromptSection(sctx *pipeline.StepContext) string {
+	if runOmitsIntent(sctx) {
+		return ""
+	}
+	return userIntentPromptSection(sctx)
 }

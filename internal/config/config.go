@@ -954,9 +954,10 @@ type GlobalIntentRaw struct {
 	// PublishIntent is the contributor-side, tighten-only publication
 	// preference for the generated public Intent section. `false` omits that
 	// section for runs started on this machine; it can never publish intent
-	// on a repository whose trusted `pr.publish_intent` disabled it, and the
-	// full intent still reaches every step prompt. Default nil, which
-	// publishes when the repository permits it.
+	// on a repository whose trusted `pr.publish_intent` disabled it. The full
+	// intent still reaches every step prompt except the PR-drafting turns,
+	// which then see no intent text at all. Default nil, which publishes when
+	// the repository permits it.
 	PublishIntent *bool `yaml:"publish_intent"`
 }
 
