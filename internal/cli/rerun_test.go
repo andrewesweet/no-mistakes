@@ -189,6 +189,9 @@ func TestRerunSendsOnlyCleanCallerHead(t *testing.T) {
 			srv.Handle(ipc.MethodGetRunsForHead, func(context.Context, json.RawMessage) (interface{}, error) {
 				return &ipc.GetRunsResult{}, nil
 			})
+			srv.Handle(ipc.MethodProbeOmitIntent, func(context.Context, json.RawMessage) (interface{}, error) {
+				return &ipc.ProbeOmitIntentResult{OK: true}, nil
+			})
 			srv.Handle(ipc.MethodGetActiveRun, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
 				select {
 				case <-commitDuringWait:

@@ -213,6 +213,41 @@ func TestAxiRunPublishingRunReusesOlderDaemon(t *testing.T) {
 	}
 }
 
+// TestRerunRefusesOlderDaemonWithoutFlagOrGlobalDefault pins the rerun path:
+// omission can be inherited from the selected prior run, which only the daemon
+// knows, so the probe runs even when neither the flag nor the global default
+// requests omission. An older daemon refuses the rerun; nothing is published.
+func TestRerunRefusesOlderDaemonWithoutFlagOrGlobalDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		probe func() (interface{}, error)
+	}{
+		{name: "probe method unknown", probe: nil},
+		{name: "probe declined", probe: func() (interface{}, error) { return &ipc.ProbeOmitIntentResult{OK: false}, nil }},
+		{name: "probe undecodable", probe: func() (interface{}, error) { return json.RawMessage(`"yes"`), nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			launched := olderDaemonFixture(t, tc.probe)
+			writeGlobalConfig(t, "intent:\n  publish_intent: true\n")
+			var out bytes.Buffer
+			cmd := newRerunCmd()
+			cmd.SetArgs([]string{})
+			cmd.SetOut(&out)
+			cmd.SetErr(&out)
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatalf("rerun should refuse an older daemon:\n%s", out.String())
+			}
+			if !strings.Contains(err.Error(), "too old to honor --no-publish-intent") {
+				t.Fatalf("error should name the daemon capability, got: %v", err)
+			}
+			if len(*launched) != 0 {
+				t.Fatalf("rerun was started on a daemon that would publish an inherited omission: %v", *launched)
+			}
+		})
+	}
+}
+
 func writeGlobalConfig(t *testing.T, yaml string) {
 	t.Helper()
 	if yaml == "" {

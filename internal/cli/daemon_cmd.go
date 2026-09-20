@@ -369,13 +369,21 @@ func parseOmitIntentPushOptions(options []string) (bool, error) {
 // never read the global `intent.publish_intent: false` default that only the
 // daemon folds into the run. Omission may apply when the flag is set or the
 // local global default is false; global is nil when the file is unreadable,
-// which counts as may-omit. The probe is a distinct method that such a daemon
-// refuses; any failure or a non-OK answer refuses the request, never falls
-// back to publishing. Only a request that cannot omit skips the probe.
+// which counts as may-omit. Only a request that cannot omit skips the probe.
+// A rerun can never rule omission out from the caller side (it inherits the
+// selected prior run's omission, which only the daemon knows), so it calls
+// probeDaemonOmitIntent unconditionally instead.
 func requireDaemonHonorsOmitIntent(client *ipc.Client, omit bool, global *config.GlobalConfig) error {
 	if !omit && global != nil && global.Intent.PublishesIntentByDefault() {
 		return nil
 	}
+	return probeDaemonOmitIntent(client)
+}
+
+// probeDaemonOmitIntent asks the daemon for the omit-intent capability. The
+// probe is a distinct method that an older daemon refuses; any failure or a
+// non-OK answer refuses the request, never falls back to publishing.
+func probeDaemonOmitIntent(client *ipc.Client) error {
 	var result ipc.ProbeOmitIntentResult
 	err := client.Call(ipc.MethodProbeOmitIntent, &ipc.ProbeOmitIntentParams{}, &result)
 	if err == nil && !result.OK {

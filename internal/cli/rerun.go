@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
-	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -59,9 +58,11 @@ func newRerunCmd() *cobra.Command {
 					return fmt.Errorf("connect to daemon: %w", err)
 				}
 				defer client.Close()
-				// A nil global config (unreadable) cannot rule omission out.
-				globalCfg, _ := config.LoadGlobal(p.ConfigFile())
-				if err := requireDaemonHonorsOmitIntent(client, noPublishIntent, globalCfg); err != nil {
+				// A rerun inherits omission from the selected prior run, and
+				// only the daemon knows that selection, so the caller can never
+				// rule omission out: probe unconditionally, whatever the flag
+				// or the global default says.
+				if err := probeDaemonOmitIntent(client); err != nil {
 					return err
 				}
 				if profile != nil {
