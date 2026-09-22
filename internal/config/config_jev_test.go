@@ -1,105 +1,75 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
-	"testing"
+	"bytes"
 
 	"gopkg.in/yaml.v3"
+	"strings"
+	"testing"
 )
 
-func TestLoadGlobal_JevDefaultsOff(t *testing.T) {
-	cfg, err := LoadGlobal("/nonexistent/config.yaml")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.Jev.ReviewAssist {
-		t.Fatal("jev.review_assist must default to false: the assist is opt-in")
-	}
-	merged := Merge(cfg, &RepoConfig{})
-	if merged.Jev.ReviewAssist {
-		t.Fatal("merged jev.review_assist must default to false")
-	}
-}
+// The jev.review_assist pre-brief and its jev.candidate_excerpt_bytes option
+// were removed after the offline trial showed the candidate generator excludes
+// changed files by construction while nearly all recorded finding locations
+// are changed files, so the listing cannot reach what it ranks for. The keys
+// are gone from the resolved config and the documentation; the raw decoder
+// keeps a tombstone for the `jev:` block only so a global config that still
+// sets either key keeps parsing with no effect instead of failing the whole
+// document as an unknown field.
 
-func TestLoadGlobal_JevReviewAssist(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte("jev:\n  review_assist: true\n"), 0o644); err != nil {
+// TestRetiredJevKeysParseWithoutEffect pins the retirement contract: a global
+// config carrying either removed key (or both, with arbitrary content) loads
+// cleanly and merges exactly like a config without the block - there is no
+// Jev setting left on GlobalConfig or the merged Config to set.
+func TestRetiredJevKeysParseWithoutEffect(t *testing.T) {
+	withKeys, err := LoadGlobalFromBytes([]byte("log_level: info\njev:\n  review_assist: true\n  candidate_excerpt_bytes: 1024\n"))
+	if err != nil {
+		t.Fatalf("global config with retired jev keys must still parse: %v", err)
+	}
+	withoutKeys, err := LoadGlobalFromBytes([]byte("log_level: info\n"))
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	cfg, err := LoadGlobal(path)
-	if err != nil {
-		t.Fatalf("LoadGlobal: %v", err)
+	if withKeys.LogLevel != withoutKeys.LogLevel || withKeys.Eval != withoutKeys.Eval || withKeys.SessionReuse != withoutKeys.SessionReuse || withKeys.Agent != withoutKeys.Agent {
+		t.Fatalf("retired jev block changed the parsed config: with = %#v, without = %#v", withKeys, withoutKeys)
 	}
-	if !cfg.Jev.ReviewAssist {
-		t.Fatal("jev.review_assist = false, want true")
-	}
-	merged := Merge(cfg, &RepoConfig{})
-	if !merged.Jev.ReviewAssist {
-		t.Fatal("merged jev.review_assist = false, want the global value copied straight through")
+	mergedWith := Merge(withKeys, &RepoConfig{})
+	mergedWithout := Merge(withoutKeys, &RepoConfig{})
+	if mergedWith.Eval != mergedWithout.Eval || mergedWith.LogLevel != mergedWithout.LogLevel || mergedWith.Agent != mergedWithout.Agent {
+		t.Fatalf("retired jev block changed the merged config: with = %#v, without = %#v", mergedWith, mergedWithout)
 	}
 }
 
-// TestRepoConfig_JevKeyIsNotARepoField pins the trust boundary: jev settings
-// are global-only, so a pushed branch cannot enable or steer the pre-screen
-// that feeds the reviewer gating it. RepoConfig ignores unknown keys, which
-// is exactly what makes a repo-level jev: block inert.
-func TestRepoConfig_JevKeyIsNotARepoField(t *testing.T) {
-	var repo RepoConfig
-	if err := yaml.Unmarshal([]byte("jev:\n  review_assist: true\n  candidate_excerpt_bytes: 2048\n"), &repo); err != nil {
-		t.Fatalf("repo config with a jev key must stay parseable (it is ignored): %v", err)
+// TestRetiredJevTombstoneSwallowsTheBlock decodes the raw schema directly to
+// pin the mechanism: the retired block lands in the tombstone and is
+// discarded, so even content no removed feature ever defined parses silently.
+func TestRetiredJevTombstoneSwallowsTheBlock(t *testing.T) {
+	var raw globalConfigRaw
+	dec := yaml.NewDecoder(bytes.NewReader([]byte("jev:\n  review_assist: true\n  candidate_excerpt_bytes: -1\n  something_else: yes\n")))
+	dec.KnownFields(true)
+	if err := dec.Decode(&raw); err != nil {
+		t.Fatalf("retired jev block must parse under the strict decoder: %v", err)
 	}
-	global := DefaultGlobalConfig()
-	merged := Merge(global, &repo)
-	if merged.Jev.ReviewAssist {
-		t.Fatal("a repository configuration must not be able to enable the jev assist")
-	}
-	if merged.Jev.CandidateExcerptBytes != 0 {
-		t.Fatal("a repository configuration must not be able to enable candidate excerpts")
+	if raw.Jev != (retiredJev{}) {
+		t.Fatalf("tombstone retained content: %#v", raw.Jev)
 	}
 }
 
-func TestLoadGlobal_JevCandidateExcerptBytesDefaultsOff(t *testing.T) {
-	cfg, err := LoadGlobal("/nonexistent/config.yaml")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.Jev.CandidateExcerptBytes != 0 {
-		t.Fatalf("jev.candidate_excerpt_bytes = %d, want 0 (path-only candidates)", cfg.Jev.CandidateExcerptBytes)
+// TestEmptyJevBlockStillParses covers `jev:` with nothing under it, which must
+// behave exactly like an absent key.
+func TestEmptyJevBlockStillParses(t *testing.T) {
+	if _, err := LoadGlobalFromBytes([]byte("jev:\nlog_level: info\n")); err != nil {
+		t.Fatalf("empty jev block must parse: %v", err)
 	}
 }
 
-func TestLoadGlobal_JevCandidateExcerptBytes(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte("jev:\n  candidate_excerpt_bytes: 2048\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := LoadGlobal(path)
-	if err != nil {
-		t.Fatalf("LoadGlobal: %v", err)
-	}
-	if cfg.Jev.CandidateExcerptBytes != 2048 {
-		t.Fatalf("jev.candidate_excerpt_bytes = %d, want 2048", cfg.Jev.CandidateExcerptBytes)
-	}
-	if cfg.Jev.ReviewAssist {
-		t.Fatal("setting the excerpt budget must not enable the assist")
-	}
-	merged := Merge(cfg, &RepoConfig{})
-	if merged.Jev.CandidateExcerptBytes != 2048 {
-		t.Fatalf("merged jev.candidate_excerpt_bytes = %d, want the global value copied straight through", merged.Jev.CandidateExcerptBytes)
-	}
-}
-
-func TestLoadGlobal_JevCandidateExcerptBytesNegativeFailsClosed(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte("jev:\n  candidate_excerpt_bytes: -1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadGlobal(path); err == nil {
-		t.Fatal("negative jev.candidate_excerpt_bytes must fail the config closed")
+// TestUnknownTopLevelKeyStillFails pins that the tombstone did not weaken the
+// strict decoder anywhere else: a genuinely unknown top-level key is still
+// rejected, so the retired block is tolerated by name, not by turning off
+// known-fields checking.
+func TestUnknownTopLevelKeyStillFails(t *testing.T) {
+	_, err := LoadGlobalFromBytes([]byte("not_a_real_key: true\n"))
+	if err == nil || !strings.Contains(err.Error(), "not found in type") {
+		t.Fatalf("unknown top-level key err = %v, want a known-fields rejection", err)
 	}
 }

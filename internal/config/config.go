@@ -202,12 +202,7 @@ type GlobalConfig struct {
 	// this machine's local eval corpus (disk, retention, whether review rounds
 	// record replay provenance), never a repository policy. Keeping it out of
 	// RepoConfig means no pushed branch can enable, disable, or resize it.
-	Eval Eval
-	// Jev holds the resolved TypeSafe pre-brief settings (see the Jev type).
-	// Global-only for the same reason as Eval: it decides whether this
-	// machine's review turns consult an external pre-screen service under the
-	// operator's own key, so no pushed branch may enable or steer it.
-	Jev       Jev
+	Eval      Eval
 	Providers ProvidersRaw
 }
 
@@ -241,9 +236,17 @@ type globalConfigRaw struct {
 	Intent                  GlobalIntentRaw            `yaml:"intent"`
 	Test                    TestRaw                    `yaml:"test"`
 	Eval                    EvalRaw                    `yaml:"eval"`
-	Jev                     JevRaw                     `yaml:"jev"`
-	ForgeProfiles           ForgeProfiles              `yaml:"forge_profiles"`
-	Providers               ProvidersRaw               `yaml:"providers"`
+	// Jev is the retired jev.review_assist pre-brief block. The feature was
+	// removed after the offline trial showed its candidate listing cannot
+	// reach the review findings it is meant to surface. The key stays in the
+	// raw schema as a tombstone ONLY so a global config that still sets it
+	// keeps parsing: the strict decoder would otherwise reject the whole
+	// document as an unknown field. Its content is decoded and discarded, so
+	// the retired subkeys (review_assist, candidate_excerpt_bytes) have no
+	// effect; the resolved config has no Jev to configure.
+	Jev           retiredJev    `yaml:"jev"`
+	ForgeProfiles ForgeProfiles `yaml:"forge_profiles"`
+	Providers     ProvidersRaw  `yaml:"providers"`
 }
 
 // ForgeProfile selects one isolated provider CLI configuration directory.
@@ -669,10 +672,7 @@ type Config struct {
 	LogLevel              string
 	SessionReuse          bool
 	Eval                  Eval
-	// Jev is global-only by design (see GlobalConfig.Jev); Merge copies it
-	// straight through with no repository override step.
-	Jev      Jev
-	Commands Commands
+	Commands              Commands
 	// Gates are the repository's extra checks, already trusted-only by the
 	// time they reach here (EffectiveRepoConfig sourced them from the trusted
 	// default-branch copy).
@@ -918,31 +918,14 @@ type Eval struct {
 	DiversifiedSize int
 }
 
-// JevRaw is the YAML representation of the TypeSafe review pre-brief
-// settings. Pointer fields distinguish "not set" (nil) from explicit values.
-type JevRaw struct {
-	ReviewAssist *bool `yaml:"review_assist"`
-	// CandidateExcerptBytes bounds the content excerpt attached to each
-	// ranked candidate file. Nil means unset (path-only candidates).
-	CandidateExcerptBytes *int `yaml:"candidate_excerpt_bytes"`
-}
+// retiredJev accepts and discards a retired configuration block. Its
+// UnmarshalYAML receives the raw node, so the strict known-fields rule does
+// not descend into the block: every subkey a removed feature once defined
+// (and anything else under it) parses silently and configures nothing.
+type retiredJev struct{}
 
-// Jev is the resolved TypeSafe pre-brief config. ReviewAssist opts review
-// turns into one batched Jev evaluation that ranks surrounding context as
-// advisory prompt input (issue #1055). It never
-// changes what a review covers or who validates it, and every failure of the
-// assist falls back to the same cold review that runs with it off. The API
-// key is read from the daemon's TYPESAFE_API_KEY environment variable at turn
-// time, never from this document.
-type Jev struct {
-	ReviewAssist bool
-	// CandidateExcerptBytes caps the content excerpt attached to each
-	// ranked candidate file, in bytes. 0 is today's path-only behaviour:
-	// no content of an unchanged file leaves the machine. A positive value
-	// opts into sending a bounded leading slice of each candidate file to
-	// the TypeSafe API as part of the pre-brief state.
-	CandidateExcerptBytes int
-}
+// UnmarshalYAML discards the block's content.
+func (retiredJev) UnmarshalYAML(value *yaml.Node) error { return nil }
 
 // IntentRaw is the YAML representation of user-intent extraction settings.
 // Pointer fields distinguish "not set" (nil) from explicit zero/false values.
@@ -1952,7 +1935,6 @@ func DefaultGlobalConfig() *GlobalConfig {
 		LogLevel:                "info",
 		SessionReuse:            true,
 		Eval:                    evalDefaults(),
-		Jev:                     Jev{},
 	}
 }
 
@@ -2125,9 +2107,6 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateRebaseRaw(raw.Rebase); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
-	if err := validateJevRaw(raw.Jev); err != nil {
-		return nil, fmt.Errorf("parse global config: %w", err)
-	}
 
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
@@ -2261,7 +2240,6 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.Test = raw.Test
 	cfg.Providers = raw.Providers
 	applyEvalOverrides(&cfg.Eval, &raw.Eval)
-	applyJevOverrides(&cfg.Jev, &raw.Jev)
 
 	return cfg, nil
 }
@@ -2809,27 +2787,6 @@ func applyEvalOverrides(dst *Eval, src *EvalRaw) {
 	}
 }
 
-// applyJevOverrides applies non-nil raw values onto resolved defaults.
-func applyJevOverrides(dst *Jev, src *JevRaw) {
-	if src.ReviewAssist != nil {
-		dst.ReviewAssist = *src.ReviewAssist
-	}
-	if src.CandidateExcerptBytes != nil {
-		dst.CandidateExcerptBytes = *src.CandidateExcerptBytes
-	}
-}
-
-// validateJevRaw fails the config closed on a negative
-// jev.candidate_excerpt_bytes. A negative byte budget has no defensible
-// meaning here - it is neither "send nothing" (0) nor a bound - so
-// surfacing the typo beats guessing which one was meant.
-func validateJevRaw(raw JevRaw) error {
-	if raw.CandidateExcerptBytes != nil && *raw.CandidateExcerptBytes < 0 {
-		return fmt.Errorf("jev.candidate_excerpt_bytes must be 0 (path-only candidates) or greater, got %d", *raw.CandidateExcerptBytes)
-	}
-	return nil
-}
-
 // validateEvalRaw fails the config closed on a negative eval.max_cases. A
 // negative cap has no defensible meaning here - it is neither "keep everything"
 // (0) nor a bound - so surfacing the typo beats guessing which one was meant.
@@ -3102,9 +3059,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		SessionReuse:          global.SessionReuse,
 		// Eval is global-only by design (see GlobalConfig.Eval), so it is
 		// copied straight through with no repository override step.
-		Eval: global.Eval,
-		// Jev is global-only for the same reason as Eval.
-		Jev:            global.Jev,
+		Eval:           global.Eval,
 		Commands:       repo.Commands,
 		Gates:          copyGates(repo.Gates),
 		IgnorePatterns: repo.IgnorePatterns,
