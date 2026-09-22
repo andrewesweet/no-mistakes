@@ -114,6 +114,21 @@ func TestReadJevExcerpt_BinarySkipped(t *testing.T) {
 	}
 }
 
+// TestReadJevExcerpt_LargeFileYieldsBoundedPrefix pins that a candidate far
+// larger than both the budget and the binary probe window still yields the
+// same line-cut leading excerpt as a small one.
+func TestReadJevExcerpt_LargeFileYieldsBoundedPrefix(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	body := []byte(strings.Repeat("line\n", 4000))
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := readJevExcerpt(dir, "big.txt", 12); got != "line\nline\n" {
+		t.Fatalf("excerpt = %q, want two lines", got)
+	}
+}
+
 // TestReadJevExcerpt_MissingAndOutside pins fail-soft reads: a candidate
 // that cannot be read, or that escapes the worktree, contributes no excerpt
 // and no error.

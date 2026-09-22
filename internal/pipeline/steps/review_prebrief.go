@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -283,6 +284,10 @@ func attachJevExcerpts(workDir string, candidates []jevCandidate, maxBytes int) 
 	enforceJevExcerptBudget(candidates)
 }
 
+// jevExcerptProbeBytes is the leading span scanned for a NUL byte, matching
+// git's binary detection window.
+const jevExcerptProbeBytes = 8000
+
 // readJevExcerpt returns at most maxBytes of the file's leading content, cut
 // at a line boundary and UTF-8 safe, or "" when the file should contribute
 // no excerpt: unreadable, binary, outside the worktree, or not a regular
@@ -299,15 +304,22 @@ func readJevExcerpt(workDir, rel string, maxBytes int) string {
 	if info, err := os.Lstat(full); err != nil || !info.Mode().IsRegular() {
 		return ""
 	}
-	content, err := os.ReadFile(full)
+	f, err := os.Open(full)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	// Only the leading slice is ever needed: enough for the excerpt plus
+	// the binary probe, so a large tracked sibling never loads whole.
+	content, err := io.ReadAll(io.LimitReader(f, int64(max(maxBytes, jevExcerptProbeBytes))+1))
 	if err != nil || len(content) == 0 {
 		return ""
 	}
 	// Binary files get no excerpt: a NUL byte in the leading probe is the
 	// same signal git grep -I uses to treat a file as binary.
 	probe := content
-	if len(probe) > 8000 {
-		probe = probe[:8000]
+	if len(probe) > jevExcerptProbeBytes {
+		probe = probe[:jevExcerptProbeBytes]
 	}
 	if strings.IndexByte(string(probe), 0) >= 0 {
 		return ""
