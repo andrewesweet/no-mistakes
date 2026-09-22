@@ -42,6 +42,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/jev"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 )
@@ -146,6 +147,7 @@ func readLabels(path string) ([]candidateLabel, error) {
 		return nil, err
 	}
 	var labels []candidateLabel
+	seen := map[string]bool{}
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -157,12 +159,61 @@ func readLabels(path string) ([]candidateLabel, error) {
 		if l.Path == "" || l.Reason == "" {
 			return nil, fmt.Errorf("parse %s: label without path or reason: %s", path, line)
 		}
+		if seen[l.Path] {
+			return nil, fmt.Errorf("parse %s: duplicate label for %s", path, l.Path)
+		}
+		seen[l.Path] = true
 		labels = append(labels, l)
 	}
 	if len(labels) == 0 {
 		return nil, fmt.Errorf("no labels in %s", path)
 	}
 	return labels, nil
+}
+
+// checkCandidateLabels requires the candidate set and the label set to be the
+// same set: every candidate labeled exactly once and every label a candidate.
+// A label without a candidate would inflate the recall denominator and a
+// duplicate candidate would count twice in the ranked order, so either
+// mismatch refuses the replay instead of publishing a skewed metric.
+func checkCandidateLabels(source string, candidates []string, relevant map[string]bool) error {
+	seen := make(map[string]bool, len(candidates))
+	for _, p := range candidates {
+		if _, ok := relevant[p]; !ok {
+			return fmt.Errorf("%s: candidate %s has no label", source, p)
+		}
+		if seen[p] {
+			return fmt.Errorf("%s: duplicate candidate %s", source, p)
+		}
+		seen[p] = true
+	}
+	for p := range relevant {
+		if !seen[p] {
+			return fmt.Errorf("%s: label %s is not a candidate", source, p)
+		}
+	}
+	return nil
+}
+
+// checkListed requires a bare recorded listed set to be distinct candidates:
+// the production listing is always a subset of the candidates, so anything
+// else is a malformed recording rather than a ranking to measure.
+func checkListed(source string, listed, candidates []string) error {
+	candidate := make(map[string]bool, len(candidates))
+	for _, p := range candidates {
+		candidate[p] = true
+	}
+	seen := make(map[string]bool, len(listed))
+	for _, p := range listed {
+		if !candidate[p] {
+			return fmt.Errorf("%s: listed %s is not a candidate", source, p)
+		}
+		if seen[p] {
+			return fmt.Errorf("%s: duplicate listed %s", source, p)
+		}
+		seen[p] = true
+	}
+	return nil
 }
 
 // replayRecorded ranks a recorded response: full answers run through the
@@ -181,15 +232,20 @@ func replayRecorded(responsePath, base, head string, relevant map[string]bool) (
 		return nil, 0, "", "", 0, false, fmt.Errorf("%s records %s..%s, want %s..%s", responsePath, rec.BaseSHA, rec.HeadSHA, base, head)
 	}
 	candidates := make([]steps.JevReplayCandidate, len(rec.Candidates))
+	paths := make([]string, len(rec.Candidates))
 	for i, c := range rec.Candidates {
-		if _, ok := relevant[c.Path]; !ok {
-			return nil, 0, "", "", 0, false, fmt.Errorf("%s: candidate %s has no label", responsePath, c.Path)
-		}
 		candidates[i] = steps.JevReplayCandidate{Path: c.Path, Coupling: c.Coupling, Excerpt: c.Excerpt}
+		paths[i] = c.Path
+	}
+	if err := checkCandidateLabels(responsePath, paths, relevant); err != nil {
+		return nil, 0, "", "", 0, false, err
 	}
 	if len(rec.Answers) > 0 {
 		resp := &jev.Response{Model: rec.JevModel, Answers: rec.Answers, Usage: jev.Usage{InputTokens: rec.JevInputTokens}}
 		return steps.RankJevPrebrief(resp, candidates), len(candidates), rec.Mode, rec.JevModel, rec.JevInputTokens, true, nil
+	}
+	if err := checkListed(responsePath, rec.Listed, paths); err != nil {
+		return nil, 0, "", "", 0, false, err
 	}
 	return rec.Listed, len(candidates), rec.Mode, rec.JevModel, rec.JevInputTokens, false, nil
 }
@@ -218,15 +274,23 @@ func replayLive(repo, base, head, change, outDir string, excerptBytes int, relev
 		_ = exec.Command("git", "-C", repo, "worktree", "remove", "--force", fixtureDir).Run()
 	}()
 
-	ctx := context.Background()
-	state, candidates, err := steps.BuildJevReplayState(ctx, fixtureDir, "refs/heads/jevbench-replay", base, head, excerptBytes, nil)
+	// Production reads ignore_patterns from the pushed head, which is what
+	// the fixture worktree holds, so the replay excludes the same candidates.
+	repoCfg, err := config.LoadRepo(fixtureDir)
 	if err != nil {
 		return nil, nil, err
 	}
-	for _, c := range candidates {
-		if _, ok := relevant[c.Path]; !ok {
-			return nil, nil, fmt.Errorf("live candidate %s has no label; label the change before replaying it", c.Path)
-		}
+	ctx := context.Background()
+	state, candidates, err := steps.BuildJevReplayState(ctx, fixtureDir, "refs/heads/jevbench-replay", base, head, excerptBytes, repoCfg.IgnorePatterns)
+	if err != nil {
+		return nil, nil, err
+	}
+	paths := make([]string, len(candidates))
+	for i, c := range candidates {
+		paths[i] = c.Path
+	}
+	if err := checkCandidateLabels("live "+head, paths, relevant); err != nil {
+		return nil, nil, fmt.Errorf("%w; label the change before replaying it", err)
 	}
 	resp, err := client.Evaluate(ctx, state, steps.JevReplayQuestions(candidates))
 	if err != nil {
