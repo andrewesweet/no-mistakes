@@ -2,8 +2,7 @@ package config
 
 import (
 	"bytes"
-
-	"gopkg.in/yaml.v3"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -13,14 +12,13 @@ import (
 // changed files by construction while nearly all recorded finding locations
 // are changed files, so the listing cannot reach what it ranks for. The keys
 // are gone from the resolved config and the documentation; the raw decoder
-// keeps a tombstone for the `jev:` block only so a global config that still
-// sets either key keeps parsing with no effect instead of failing the whole
-// document as an unknown field.
+// names them only so a global config that still sets one keeps parsing, with a
+// deprecation warning and no effect.
 
 // TestRetiredJevKeysParseWithoutEffect pins the retirement contract: a global
-// config carrying either removed key (or both, with arbitrary content) loads
-// cleanly and merges exactly like a config without the block - there is no
-// Jev setting left on GlobalConfig or the merged Config to set.
+// config carrying either removed key loads cleanly and merges exactly like a
+// config without the block - there is no Jev setting left on GlobalConfig or
+// the merged Config to set.
 func TestRetiredJevKeysParseWithoutEffect(t *testing.T) {
 	withKeys, err := LoadGlobalFromBytes([]byte("log_level: info\njev:\n  review_assist: true\n  candidate_excerpt_bytes: 1024\n"))
 	if err != nil {
@@ -40,18 +38,50 @@ func TestRetiredJevKeysParseWithoutEffect(t *testing.T) {
 	}
 }
 
-// TestRetiredJevTombstoneSwallowsTheBlock decodes the raw schema directly to
-// pin the mechanism: the retired block lands in the tombstone and is
-// discarded, so even content no removed feature ever defined parses silently.
-func TestRetiredJevTombstoneSwallowsTheBlock(t *testing.T) {
-	var raw globalConfigRaw
-	dec := yaml.NewDecoder(bytes.NewReader([]byte("jev:\n  review_assist: true\n  candidate_excerpt_bytes: -1\n  something_else: yes\n")))
-	dec.KnownFields(true)
-	if err := dec.Decode(&raw); err != nil {
-		t.Fatalf("retired jev block must parse under the strict decoder: %v", err)
+// TestRetiredJevKeysWarnAtLoad pins that an operator whose config still sets a
+// retired key is told it has no effect, once per set key, on the load-time
+// diagnostic channel.
+func TestRetiredJevKeysWarnAtLoad(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yaml string
+		want []string
+	}{
+		{"both", "jev:\n  review_assist: true\n  candidate_excerpt_bytes: 1024\n", []string{"jev.review_assist", "jev.candidate_excerpt_bytes"}},
+		{"review_assist only", "jev:\n  review_assist: false\n", []string{"jev.review_assist"}},
+		{"absent", "log_level: info\n", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			defer slog.SetDefault(prev)
+
+			if _, err := LoadGlobalFromBytes([]byte(tc.yaml)); err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			logged := buf.String()
+			if got, want := strings.Count(logged, "deprecated"), len(tc.want); got != want {
+				t.Fatalf("deprecation lines = %d, want %d: %s", got, want, logged)
+			}
+			for _, key := range tc.want {
+				if !strings.Contains(logged, key) {
+					t.Fatalf("missing deprecation for %s: %s", key, logged)
+				}
+				if !strings.Contains(logged, "no effect") {
+					t.Fatalf("deprecation does not state the setting has no effect: %s", logged)
+				}
+			}
+		})
 	}
-	if raw.Jev != (retiredJev{}) {
-		t.Fatalf("tombstone retained content: %#v", raw.Jev)
+}
+
+// TestUnknownJevSubkeyFails pins that the tombstone tolerates exactly the two
+// retired keys: anything else under jev: is rejected like any unknown field.
+func TestUnknownJevSubkeyFails(t *testing.T) {
+	_, err := LoadGlobalFromBytes([]byte("jev:\n  something_else: true\n"))
+	if err == nil || !strings.Contains(err.Error(), "not found in type") {
+		t.Fatalf("unknown jev subkey err = %v, want a known-fields rejection", err)
 	}
 }
 

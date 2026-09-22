@@ -239,11 +239,11 @@ type globalConfigRaw struct {
 	// Jev is the retired jev.review_assist pre-brief block. The feature was
 	// removed after the offline trial showed its candidate listing cannot
 	// reach the review findings it is meant to surface. The key stays in the
-	// raw schema as a tombstone ONLY so a global config that still sets it
-	// keeps parsing: the strict decoder would otherwise reject the whole
-	// document as an unknown field. Its content is decoded and discarded, so
-	// the retired subkeys (review_assist, candidate_excerpt_bytes) have no
-	// effect; the resolved config has no Jev to configure.
+	// raw schema as a tombstone ONLY so a global config that still sets one of
+	// the two retired subkeys keeps parsing: the strict decoder would
+	// otherwise reject the whole document as an unknown field. Setting either
+	// key is reported as deprecated at load and has no effect; the resolved
+	// config has no Jev to configure.
 	Jev           retiredJev    `yaml:"jev"`
 	ForgeProfiles ForgeProfiles `yaml:"forge_profiles"`
 	Providers     ProvidersRaw  `yaml:"providers"`
@@ -918,14 +918,25 @@ type Eval struct {
 	DiversifiedSize int
 }
 
-// retiredJev accepts and discards a retired configuration block. Its
-// UnmarshalYAML receives the raw node, so the strict known-fields rule does
-// not descend into the block: every subkey a removed feature once defined
-// (and anything else under it) parses silently and configures nothing.
-type retiredJev struct{}
+// retiredJev names exactly the two retired jev subkeys so a global config
+// that still sets one keeps parsing under the strict known-fields rule. Both
+// are pointers so a set key is distinguishable from an absent one and can be
+// reported as deprecated at load time; neither configures anything. Any other
+// subkey under jev: is rejected like any unknown field.
+type retiredJev struct {
+	ReviewAssist          *bool `yaml:"review_assist"`
+	CandidateExcerptBytes *int  `yaml:"candidate_excerpt_bytes"`
+}
 
-// UnmarshalYAML discards the block's content.
-func (retiredJev) UnmarshalYAML(value *yaml.Node) error { return nil }
+// warnRetiredJev reports each set retired jev key once at load time.
+func warnRetiredJev(raw retiredJev) {
+	if raw.ReviewAssist != nil {
+		slog.Warn("jev.review_assist is deprecated: the jev review pre-brief was removed and this setting has no effect")
+	}
+	if raw.CandidateExcerptBytes != nil {
+		slog.Warn("jev.candidate_excerpt_bytes is deprecated: the jev review pre-brief was removed and this setting has no effect")
+	}
+}
 
 // IntentRaw is the YAML representation of user-intent extraction settings.
 // Pointer fields distinguish "not set" (nil) from explicit zero/false values.
@@ -2107,6 +2118,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateRebaseRaw(raw.Rebase); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	warnRetiredJev(raw.Jev)
 
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
