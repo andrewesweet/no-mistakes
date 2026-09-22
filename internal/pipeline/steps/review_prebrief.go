@@ -203,7 +203,8 @@ func buildJevReviewState(ctx context.Context, sctx *pipeline.StepContext, baseSH
 
 // buildJevStateFromRev is the sctx-free core behind buildJevReviewState, so
 // the offline replay harness can assemble the same production state from an
-// explicit revision range. Like jevDiffArgs, a rereview diffs the worktree
+// explicit revision range. The range mirrors the review turn's changed-files
+// diff, limited to the reviewable paths: a rereview diffs the worktree
 // against the base (fix commits plus uncommitted fixer work) while an
 // initial review diffs base..head.
 func buildJevStateFromRev(ctx context.Context, workDir, branch, baseSHA, rev string, changed, reviewable []string, ignorePatterns []string) (*jevChangeState, []jevCandidate) {
@@ -231,23 +232,6 @@ func buildJevStateFromRev(ctx context.Context, workDir, branch, baseSHA, rev str
 	}
 	candidates := jevContextCandidates(ctx, workDir, diff, changed, reviewable, ignorePatterns)
 	return &jevChangeState{Change: digest, Candidates: candidates}, candidates
-}
-
-// jevDiffArgs mirrors the changed-files diff range of the review turn,
-// limited to the reviewable paths: a rereview diffs the worktree against the
-// base (fix commits plus uncommitted fixer work), an initial review diffs
-// base..head. opts are diff options placed before the range.
-func jevDiffArgs(sctx *pipeline.StepContext, baseSHA string, reviewable []string, opts ...string) []string {
-	rev := baseSHA + ".." + sctx.Run.HeadSHA
-	if sctx.Fixing {
-		rev = baseSHA
-	}
-	args := append([]string{"diff", "--no-renames"}, opts...)
-	args = append(args, rev, "--")
-	for _, p := range reviewable {
-		args = append(args, ":(literal)"+p)
-	}
-	return args
 }
 
 // buildJevQuestions packs one relevance Score per candidate into a single
@@ -301,13 +285,18 @@ func attachJevExcerpts(workDir string, candidates []jevCandidate, maxBytes int) 
 
 // readJevExcerpt returns at most maxBytes of the file's leading content, cut
 // at a line boundary and UTF-8 safe, or "" when the file should contribute
-// no excerpt: unreadable, binary, or outside the worktree.
+// no excerpt: unreadable, binary, outside the worktree, or not a regular
+// file (a tracked symlink's git content is its link text, so following it
+// would ship the target's bytes instead).
 func readJevExcerpt(workDir, rel string, maxBytes int) string {
 	if rel == "" || filepath.IsAbs(rel) {
 		return ""
 	}
 	full := filepath.Join(workDir, filepath.FromSlash(rel))
 	if outside, err := filepath.Rel(workDir, full); err != nil || outside == ".." || strings.HasPrefix(outside, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	if info, err := os.Lstat(full); err != nil || !info.Mode().IsRegular() {
 		return ""
 	}
 	content, err := os.ReadFile(full)

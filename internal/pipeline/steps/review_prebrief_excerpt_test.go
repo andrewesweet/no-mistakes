@@ -131,6 +131,25 @@ func TestReadJevExcerpt_MissingAndOutside(t *testing.T) {
 	}
 }
 
+// TestReadJevExcerpt_SymlinkNotFollowed pins that a tracked symlink (which
+// git ls-files lists as a candidate) contributes no excerpt: following it
+// would ship the link target's bytes, which may live outside the worktree.
+func TestReadJevExcerpt_SymlinkNotFollowed(t *testing.T) {
+	t.Parallel()
+	outside := t.TempDir()
+	target := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(target, []byte("hostname-secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(dir, "latest")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if got := readJevExcerpt(dir, "latest", 1024); got != "" {
+		t.Fatalf("symlink excerpt = %q, want none", got)
+	}
+}
+
 // TestEnforceJevExcerptBudget_DropsLowestCouplingFirst pins the per-request
 // ceiling: excerpts past it are cleared from the lowest-coupling candidates
 // first, with a path tie-break, and the survivors keep their excerpts.

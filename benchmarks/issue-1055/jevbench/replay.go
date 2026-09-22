@@ -115,11 +115,12 @@ func runReplay(repo, base, head, change, outDir, labelsPath, responsePath string
 	}
 
 	var order []string
+	var candidateCount int
 	var mode, model string
 	var inputTokens int
 	var scoreRanked bool
 	if responsePath != "" {
-		order, mode, model, inputTokens, scoreRanked, err = replayRecorded(responsePath, base, head, relevant)
+		order, candidateCount, mode, model, inputTokens, scoreRanked, err = replayRecorded(responsePath, base, head, relevant)
 		if err != nil {
 			return err
 		}
@@ -132,7 +133,7 @@ func runReplay(repo, base, head, change, outDir, labelsPath, responsePath string
 		return writeReplaySummary(outDir, change, summary)
 	}
 
-	summary := summarizeReplay(change, mode, base, head, order, relevant, labeledRelevant)
+	summary := summarizeReplay(change, mode, base, head, order, candidateCount, relevant, labeledRelevant)
 	summary.JevModel = model
 	summary.JevInputTokens = inputTokens
 	summary.ScoreRanked = scoreRanked
@@ -167,30 +168,30 @@ func readLabels(path string) ([]candidateLabel, error) {
 // replayRecorded ranks a recorded response: full answers run through the
 // production listing rule, while a bare listed set (the issue-1125 record)
 // is measured as-is.
-func replayRecorded(responsePath, base, head string, relevant map[string]bool) (order []string, mode, model string, inputTokens int, scoreRanked bool, err error) {
+func replayRecorded(responsePath, base, head string, relevant map[string]bool) (order []string, candidateCount int, mode, model string, inputTokens int, scoreRanked bool, err error) {
 	data, err := os.ReadFile(responsePath)
 	if err != nil {
-		return nil, "", "", 0, false, err
+		return nil, 0, "", "", 0, false, err
 	}
 	var rec recordedResponse
 	if err := json.Unmarshal(data, &rec); err != nil {
-		return nil, "", "", 0, false, fmt.Errorf("parse %s: %w", responsePath, err)
+		return nil, 0, "", "", 0, false, fmt.Errorf("parse %s: %w", responsePath, err)
 	}
 	if rec.BaseSHA != base || rec.HeadSHA != head {
-		return nil, "", "", 0, false, fmt.Errorf("%s records %s..%s, want %s..%s", responsePath, rec.BaseSHA, rec.HeadSHA, base, head)
+		return nil, 0, "", "", 0, false, fmt.Errorf("%s records %s..%s, want %s..%s", responsePath, rec.BaseSHA, rec.HeadSHA, base, head)
 	}
 	candidates := make([]steps.JevReplayCandidate, len(rec.Candidates))
 	for i, c := range rec.Candidates {
 		if _, ok := relevant[c.Path]; !ok {
-			return nil, "", "", 0, false, fmt.Errorf("%s: candidate %s has no label", responsePath, c.Path)
+			return nil, 0, "", "", 0, false, fmt.Errorf("%s: candidate %s has no label", responsePath, c.Path)
 		}
 		candidates[i] = steps.JevReplayCandidate{Path: c.Path, Coupling: c.Coupling, Excerpt: c.Excerpt}
 	}
 	if len(rec.Answers) > 0 {
 		resp := &jev.Response{Model: rec.JevModel, Answers: rec.Answers, Usage: jev.Usage{InputTokens: rec.JevInputTokens}}
-		return steps.RankJevPrebrief(resp, candidates), rec.Mode, rec.JevModel, rec.JevInputTokens, true, nil
+		return steps.RankJevPrebrief(resp, candidates), len(candidates), rec.Mode, rec.JevModel, rec.JevInputTokens, true, nil
 	}
-	return rec.Listed, rec.Mode, rec.JevModel, rec.JevInputTokens, false, nil
+	return rec.Listed, len(candidates), rec.Mode, rec.JevModel, rec.JevInputTokens, false, nil
 }
 
 // replayLive rebuilds the production state from the repo, calls the live
@@ -259,14 +260,14 @@ func replayLive(repo, base, head, change, outDir string, excerptBytes int, relev
 	}
 	fmt.Printf("jevbench: live %s response recorded in %s\n", mode, recordPath)
 
-	summary := summarizeReplay(change, mode, base, head, order, relevant, labeledRelevant)
+	summary := summarizeReplay(change, mode, base, head, order, len(candidates), relevant, labeledRelevant)
 	summary.JevModel = resp.Model
 	summary.JevInputTokens = resp.Usage.InputTokens
 	summary.ScoreRanked = true
 	return order, summary, nil
 }
 
-func summarizeReplay(change, mode, base, head string, order []string, relevant map[string]bool, labeledRelevant int) *replaySummary {
+func summarizeReplay(change, mode, base, head string, order []string, candidateCount int, relevant map[string]bool, labeledRelevant int) *replaySummary {
 	top := order
 	if len(top) > 10 {
 		top = top[:10]
@@ -285,7 +286,7 @@ func summarizeReplay(change, mode, base, head string, order []string, relevant m
 	}
 	summary := &replaySummary{
 		Change: change, Mode: mode, BaseSHA: base, HeadSHA: head,
-		Candidates: len(relevant), LabeledRelevant: labeledRelevant,
+		Candidates: candidateCount, LabeledRelevant: labeledRelevant,
 		RankedOrder: order, HitAt10: hit,
 		Listed: len(order), ListedRelevant: listedRelevant,
 	}
