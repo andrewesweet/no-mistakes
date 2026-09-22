@@ -922,6 +922,9 @@ type Eval struct {
 // settings. Pointer fields distinguish "not set" (nil) from explicit values.
 type JevRaw struct {
 	ReviewAssist *bool `yaml:"review_assist"`
+	// CandidateExcerptBytes bounds the content excerpt attached to each
+	// ranked candidate file. Nil means unset (path-only candidates).
+	CandidateExcerptBytes *int `yaml:"candidate_excerpt_bytes"`
 }
 
 // Jev is the resolved TypeSafe pre-brief config. ReviewAssist opts review
@@ -933,6 +936,12 @@ type JevRaw struct {
 // time, never from this document.
 type Jev struct {
 	ReviewAssist bool
+	// CandidateExcerptBytes caps the content excerpt attached to each
+	// ranked candidate file, in bytes. 0 is today's path-only behaviour:
+	// no content of an unchanged file leaves the machine. A positive value
+	// opts into sending a bounded leading slice of each candidate file to
+	// the TypeSafe API as part of the pre-brief state.
+	CandidateExcerptBytes int
 }
 
 // IntentRaw is the YAML representation of user-intent extraction settings.
@@ -2116,6 +2125,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateRebaseRaw(raw.Rebase); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	if err := validateJevRaw(raw.Jev); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
 
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
@@ -2802,6 +2814,20 @@ func applyJevOverrides(dst *Jev, src *JevRaw) {
 	if src.ReviewAssist != nil {
 		dst.ReviewAssist = *src.ReviewAssist
 	}
+	if src.CandidateExcerptBytes != nil {
+		dst.CandidateExcerptBytes = *src.CandidateExcerptBytes
+	}
+}
+
+// validateJevRaw fails the config closed on a negative
+// jev.candidate_excerpt_bytes. A negative byte budget has no defensible
+// meaning here - it is neither "send nothing" (0) nor a bound - so
+// surfacing the typo beats guessing which one was meant.
+func validateJevRaw(raw JevRaw) error {
+	if raw.CandidateExcerptBytes != nil && *raw.CandidateExcerptBytes < 0 {
+		return fmt.Errorf("jev.candidate_excerpt_bytes must be 0 (path-only candidates) or greater, got %d", *raw.CandidateExcerptBytes)
+	}
+	return nil
 }
 
 // validateEvalRaw fails the config closed on a negative eval.max_cases. A

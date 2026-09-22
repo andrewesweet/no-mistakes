@@ -139,7 +139,18 @@ func run() error {
 	agentName := flag.String("agent", string(types.AgentPi), "pipeline agent harness")
 	model := flag.String("model", "", "model override (default: harness default)")
 	effort := flag.String("effort", "", "effort override (default: harness default)")
+	replay := flag.Bool("replay", false, "replay candidate ranking against -labels instead of running a review launch")
+	labels := flag.String("labels", "", "candidate relevance label set (JSONL, required in replay mode)")
+	response := flag.String("response", "", "recorded pre-brief response (JSON); without it replay calls the live API")
+	excerptBytes := flag.Int("excerpt-bytes", 0, "per-candidate excerpt budget for a live replay (0 = path-only)")
 	flag.Parse()
+
+	if *replay {
+		if *base == "" || *head == "" || *outDir == "" {
+			return errors.New("-base, -head, and -out are required in replay mode")
+		}
+		return runReplay(*repo, *base, *head, *change, *outDir, *labels, *response, *excerptBytes)
+	}
 
 	if *base == "" || *head == "" || *outDir == "" {
 		return errors.New("-base, -head, and -out are required")

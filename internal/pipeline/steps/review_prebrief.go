@@ -3,10 +3,13 @@ package steps
 import (
 	"context"
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/jev"
@@ -75,6 +78,15 @@ const jevMaxCandidates = 40
 // jevMaxListed caps how many ranked files the pre-brief lists.
 const jevMaxListed = 10
 
+// jevMaxExcerptTotalBytes caps the summed candidate excerpts in one Jev
+// request. Per-candidate bytes come from the operator's
+// jev.candidate_excerpt_bytes, but 40 candidates at a generous per-file
+// budget would otherwise dwarf the 32k-token state budget the diff digest is
+// clipped for; excerpts past this ceiling are dropped from the
+// lowest-coupling candidates first, so the request stays bounded no matter
+// how many candidates the change yields.
+const jevMaxExcerptTotalBytes = 16 * 1024
+
 // jevRelevanceThreshold is the probability mass a candidate must carry at
 // "relevant" or "essential" (levels 2 and 3 of jevRelevanceLevels) combined
 // to be listed. The score Jev returns is probability-weighted across all four
@@ -104,12 +116,16 @@ type jevClient interface {
 	Evaluate(ctx context.Context, state any, questions map[string]jev.Question) (*jev.Response, error)
 }
 
-// jevCandidate is one surrounding-context file offered for ranking. It is a
-// path only: no content of an unchanged file leaves the machine. coupling is
-// the code's use-site score (0 for a sibling); it is unexported, so it never
-// reaches the Jev state, and only orders the listing.
+// jevCandidate is one surrounding-context file offered for ranking. By
+// default it is a path only: no content of an unchanged file leaves the
+// machine. The opt-in jev.candidate_excerpt_bytes attaches a bounded leading
+// slice of the file as excerpt (omitted from the state when empty, so the
+// default request is byte-identical to path-only). coupling is the code's
+// use-site score (0 for a sibling); it is unexported, so it never reaches
+// the Jev state, and only orders the listing.
 type jevCandidate struct {
 	Path     string `json:"path"`
+	Excerpt  string `json:"excerpt,omitempty"`
 	coupling float64
 }
 
@@ -151,6 +167,9 @@ func (s *ReviewStep) reviewPrebriefSection(ctx context.Context, sctx *pipeline.S
 	}
 
 	state, candidates := buildJevReviewState(ctx, sctx, baseSHA, changed, reviewable)
+	if excerptBytes := sctx.Config.Jev.CandidateExcerptBytes; excerptBytes > 0 {
+		attachJevExcerpts(sctx.WorkDir, candidates, excerptBytes)
+	}
 	if state == nil {
 		logf("jev pre-brief skipped: could not read the change digest; reviewing without a pre-brief")
 		return ""
@@ -175,21 +194,42 @@ func (s *ReviewStep) reviewPrebriefSection(ctx context.Context, sctx *pipeline.S
 // and the candidate surrounding-context files. Nil when the diff itself
 // cannot be read, which the caller treats as fail-closed.
 func buildJevReviewState(ctx context.Context, sctx *pipeline.StepContext, baseSHA string, changed, reviewable []string) (*jevChangeState, []jevCandidate) {
-	stat, err := git.Run(ctx, sctx.WorkDir, jevDiffArgs(sctx, baseSHA, reviewable, "--stat")...)
+	rev := baseSHA + ".." + sctx.Run.HeadSHA
+	if sctx.Fixing {
+		rev = baseSHA
+	}
+	return buildJevStateFromRev(ctx, sctx.WorkDir, sctx.Run.Branch, baseSHA, rev, changed, reviewable, sctx.Config.IgnorePatterns)
+}
+
+// buildJevStateFromRev is the sctx-free core behind buildJevReviewState, so
+// the offline replay harness can assemble the same production state from an
+// explicit revision range. Like jevDiffArgs, a rereview diffs the worktree
+// against the base (fix commits plus uncommitted fixer work) while an
+// initial review diffs base..head.
+func buildJevStateFromRev(ctx context.Context, workDir, branch, baseSHA, rev string, changed, reviewable []string, ignorePatterns []string) (*jevChangeState, []jevCandidate) {
+	diffArgs := func(opts ...string) []string {
+		args := append([]string{"diff", "--no-renames"}, opts...)
+		args = append(args, rev, "--")
+		for _, p := range reviewable {
+			args = append(args, ":(literal)"+p)
+		}
+		return args
+	}
+	stat, err := git.Run(ctx, workDir, diffArgs("--stat")...)
 	if err != nil {
 		return nil, nil
 	}
-	diff, err := git.Run(ctx, sctx.WorkDir, jevDiffArgs(sctx, baseSHA, reviewable)...)
+	diff, err := git.Run(ctx, workDir, diffArgs()...)
 	if err != nil {
 		return nil, nil
 	}
 	digest := jevChangeDigest{
-		Branch:     sctx.Run.Branch,
+		Branch:     branch,
 		BaseCommit: baseSHA,
 		DiffStat:   clipMiddle(stat, jevStatMaxBytes),
 		Diff:       clipMiddle(diff, jevDiffMaxBytes),
 	}
-	candidates := jevContextCandidates(ctx, sctx.WorkDir, diff, changed, reviewable, sctx.Config.IgnorePatterns)
+	candidates := jevContextCandidates(ctx, workDir, diff, changed, reviewable, ignorePatterns)
 	return &jevChangeState{Change: digest, Candidates: candidates}, candidates
 }
 
@@ -211,15 +251,20 @@ func jevDiffArgs(sctx *pipeline.StepContext, baseSHA string, reviewable []string
 }
 
 // buildJevQuestions packs one relevance Score per candidate into a single
-// batched request.
+// batched request. A candidate carrying an excerpt is judged from its path
+// and that excerpt; a path-only candidate is judged from its path alone.
 func buildJevQuestions(candidates []jevCandidate) map[string]jev.Question {
 	questions := make(map[string]jev.Question, len(candidates))
 	for i := range candidates {
 		id := fmt.Sprintf("ctx_%d", i)
+		basis := "Judge from its path and the change"
+		if candidates[i].Excerpt != "" {
+			basis = "Judge from its path and its content excerpt, alongside the change"
+		}
 		questions[id] = jev.Question{
 			Type: "score",
 			Instructions: fmt.Sprintf(
-				"You are ranking supporting files for a code review. The change under review is in `change`. How relevant is the file `candidates[%d]` as surrounding context for reviewing that change? Judge from its path and the change: candidates are files that use names the change defines, then files in the same directories as the changed files.", i),
+				"You are ranking supporting files for a code review. The change under review is in `change`. How relevant is the file `candidates[%d]` as surrounding context for reviewing that change? %s: candidates are files that use names the change defines, then files in the same directories as the changed files.", i, basis),
 			Criteria: jevRelevanceLevels,
 		}
 	}
@@ -235,17 +280,186 @@ func buildJevQuestions(candidates []jevCandidate) map[string]jev.Question {
 // coupling, scaled to the strongest one, adds up to one rubric level. A file
 // that uses a changed name therefore precedes a sibling Jev scored the same,
 // but never one Jev scored a full level higher.
-func formatJevPrebrief(resp *jev.Response, candidates []jevCandidate) (string, int) {
-	type ranked struct {
-		path    string
-		jev     float64
-		blended float64
+// attachJevExcerpts fills each candidate's excerpt from the file in the
+// review worktree, bounded by maxBytes per file and jevMaxExcerptTotalBytes
+// across the request. A non-positive maxBytes leaves every candidate
+// path-only. Files that cannot be read, that look binary, or that match
+// ignore_patterns never reach this point as candidates at all (the builder
+// excludes them); a read that fails here degrades to no excerpt for that
+// file, never to an error. The per-request ceiling drops excerpts from the
+// lowest-coupling candidates first, so a large candidate list cannot grow
+// the request without bound.
+func attachJevExcerpts(workDir string, candidates []jevCandidate, maxBytes int) {
+	if maxBytes <= 0 {
+		return
 	}
+	for i := range candidates {
+		candidates[i].Excerpt = readJevExcerpt(workDir, candidates[i].Path, maxBytes)
+	}
+	enforceJevExcerptBudget(candidates)
+}
+
+// readJevExcerpt returns at most maxBytes of the file's leading content, cut
+// at a line boundary and UTF-8 safe, or "" when the file should contribute
+// no excerpt: unreadable, binary, or outside the worktree.
+func readJevExcerpt(workDir, rel string, maxBytes int) string {
+	if rel == "" || filepath.IsAbs(rel) {
+		return ""
+	}
+	full := filepath.Join(workDir, filepath.FromSlash(rel))
+	if outside, err := filepath.Rel(workDir, full); err != nil || outside == ".." || strings.HasPrefix(outside, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	content, err := os.ReadFile(full)
+	if err != nil || len(content) == 0 {
+		return ""
+	}
+	// Binary files get no excerpt: a NUL byte in the leading probe is the
+	// same signal git grep -I uses to treat a file as binary.
+	probe := content
+	if len(probe) > 8000 {
+		probe = probe[:8000]
+	}
+	if strings.IndexByte(string(probe), 0) >= 0 {
+		return ""
+	}
+	if len(content) <= maxBytes {
+		return string(trimJevExcerptTail(content))
+	}
+	if cut := strings.LastIndexByte(string(content[:maxBytes]), '\n'); cut >= 0 {
+		return string(content[:cut+1])
+	}
+	return string(trimJevExcerptTail(content[:maxBytes]))
+}
+
+// trimJevExcerptTail backs off over a trailing incomplete UTF-8 sequence so
+// a hard byte cut never ends mid-rune. A cut at a line boundary needs no
+// trimming (newline is ASCII), so this only runs on whole-file and
+// single-line excerpts.
+func trimJevExcerptTail(b []byte) []byte {
+	for len(b) > 0 {
+		r, size := utf8.DecodeLastRune(b)
+		if r != utf8.RuneError || size > 1 {
+			break
+		}
+		b = b[:len(b)-1]
+	}
+	return b
+}
+
+// enforceJevExcerptBudget clears excerpts from the lowest-coupling
+// candidates first until the summed excerpt bytes fit
+// jevMaxExcerptTotalBytes. Ties break by path so the outcome is stable.
+func enforceJevExcerptBudget(candidates []jevCandidate) {
+	total := 0
+	for _, c := range candidates {
+		total += len(c.Excerpt)
+	}
+	if total <= jevMaxExcerptTotalBytes {
+		return
+	}
+	order := make([]int, len(candidates))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(i, j int) bool {
+		a, b := candidates[order[i]], candidates[order[j]]
+		if a.coupling != b.coupling {
+			return a.coupling < b.coupling
+		}
+		return a.Path < b.Path
+	})
+	for _, i := range order {
+		if total <= jevMaxExcerptTotalBytes {
+			break
+		}
+		total -= len(candidates[i].Excerpt)
+		candidates[i].Excerpt = ""
+	}
+}
+
+// JevReplayCandidate is the exported view of one ranked candidate for the
+// offline replay harness: the path Jev saw, the code's use-site coupling the
+// listing order blends in, and the excerpt the request carried (empty for
+// path-only runs).
+type JevReplayCandidate struct {
+	Path     string
+	Coupling float64
+	Excerpt  string
+}
+
+// BuildJevReplayState assembles the production Jev state for an explicit
+// base..head range in workDir, with excerpts attached per excerptBytes, for
+// the offline replay harness. ignorePatterns filters exactly as the review
+// turn does. It returns the state as sent to Evaluate plus the ordered
+// candidates (nil when the diff itself cannot be read).
+func BuildJevReplayState(ctx context.Context, workDir, branch, baseSHA, headSHA string, excerptBytes int, ignorePatterns []string) (any, []JevReplayCandidate, error) {
+	raw, err := git.RunRaw(ctx, workDir, "diff", "--no-renames", "--name-only", "-z", baseSHA+".."+headSHA, "--")
+	if err != nil {
+		return nil, nil, fmt.Errorf("jev replay: read changed files: %w", err)
+	}
+	changed := changedPathList(string(raw))
+	reviewable := reviewablePaths(changed, ignorePatterns)
+	if len(reviewable) == 0 {
+		return nil, nil, fmt.Errorf("jev replay: no reviewable files in %s..%s", baseSHA, headSHA)
+	}
+	state, candidates := buildJevStateFromRev(ctx, workDir, branch, baseSHA, baseSHA+".."+headSHA, changed, reviewable, ignorePatterns)
+	if state == nil {
+		return nil, nil, fmt.Errorf("jev replay: could not read the change digest")
+	}
+	attachJevExcerpts(workDir, candidates, excerptBytes)
+	replay := make([]JevReplayCandidate, len(candidates))
+	for i, c := range candidates {
+		replay[i] = JevReplayCandidate{Path: c.Path, Coupling: c.coupling, Excerpt: c.Excerpt}
+	}
+	return state, replay, nil
+}
+
+// JevReplayQuestions packs the production relevance questions for replay
+// candidates, so a live replay call asks exactly what the review turn asks.
+func JevReplayQuestions(candidates []JevReplayCandidate) map[string]jev.Question {
+	return buildJevQuestions(replayCandidates(candidates))
+}
+
+// RankJevPrebrief applies the production listing rule to a recorded response
+// and returns the listed paths in display order. The replay harness joins
+// this order against its relevance labels to measure hit rate.
+func RankJevPrebrief(resp *jev.Response, candidates []JevReplayCandidate) []string {
+	internal := replayCandidates(candidates)
+	listing := rankJevPrebrief(resp, internal)
+	paths := make([]string, len(listing))
+	for i, item := range listing {
+		paths[i] = item.path
+	}
+	return paths
+}
+
+// replayCandidates converts replay candidates to the internal shape the
+// production ranker and question packer run on.
+func replayCandidates(candidates []JevReplayCandidate) []jevCandidate {
+	internal := make([]jevCandidate, len(candidates))
+	for i, c := range candidates {
+		internal[i] = jevCandidate{Path: c.Path, Excerpt: c.Excerpt, coupling: c.Coupling}
+	}
+	return internal
+}
+
+type jevRanked struct {
+	path    string
+	jev     float64
+	blended float64
+}
+
+// rankJevPrebrief applies the listing rule: Jev's score alone decides which
+// candidates are listed, and the code's use-site evidence lifts a candidate
+// by up to one rubric level in the order. The cap keeps the files Jev scored
+// highest, and the blend only reorders them.
+func rankJevPrebrief(resp *jev.Response, candidates []jevCandidate) []jevRanked {
 	strongest := 0.0
 	for _, c := range candidates {
 		strongest = max(strongest, c.coupling)
 	}
-	var listing []ranked
+	var listing []jevRanked
 	for i, c := range candidates {
 		answer, ok := resp.Answers[fmt.Sprintf("ctx_%d", i)]
 		if !ok || answer.Type != "score" {
@@ -258,16 +472,24 @@ func formatJevPrebrief(resp *jev.Response, candidates []jevCandidate) (string, i
 		if strongest > 0 {
 			blended += c.coupling / strongest
 		}
-		listing = append(listing, ranked{path: c.Path, jev: answer.Score, blended: blended})
+		listing = append(listing, jevRanked{path: c.Path, jev: answer.Score, blended: blended})
 	}
 	if len(listing) == 0 {
-		return "", 0
+		return nil
 	}
 	sort.SliceStable(listing, func(i, j int) bool { return listing[i].jev > listing[j].jev })
 	if len(listing) > jevMaxListed {
 		listing = listing[:jevMaxListed]
 	}
 	sort.SliceStable(listing, func(i, j int) bool { return listing[i].blended > listing[j].blended })
+	return listing
+}
+
+func formatJevPrebrief(resp *jev.Response, candidates []jevCandidate) (string, int) {
+	listing := rankJevPrebrief(resp, candidates)
+	if len(listing) == 0 {
+		return "", 0
+	}
 	var b strings.Builder
 	b.WriteString("\n\nPre-brief (advisory output of a fast pre-screen model; claims, not evidence):\n")
 	b.WriteString("Every obligation above is unchanged: read and judge every changed file yourself, and treat each statement below as a hint to verify, never as a finding.\n")

@@ -695,11 +695,13 @@ Opt-in TypeSafe Jev pre-brief for review turns (issue #1055).
 ```yaml
 jev:
   review_assist: false
+  candidate_excerpt_bytes: 0
 ```
 
-| Field               | Type   | Default | Description                                       |
-| ------------------- | ------ | ------- | ------------------------------------------------- |
-| `jev.review_assist` | `bool` | `false` | Consult TypeSafe Jev before each review turn      |
+| Field                         | Type   | Default | Description                                                  |
+| ----------------------------- | ------ | ------- | ------------------------------------------------------------ |
+| `jev.review_assist`           | `bool` | `false` | Consult TypeSafe Jev before each review turn                 |
+| `jev.candidate_excerpt_bytes` | `int`  | `0`     | Per-candidate content excerpt budget in bytes (`0` = path-only) |
 
 When enabled and [`TYPESAFE_API_KEY`](/no-mistakes/reference/environment/#typesafe_api_key) is set in the daemon's environment, each review turn - the initial review and every rereview - runs one batched Jev evaluation over a code-filtered digest of the change before the reviewer launches.
 The digest covers only the files the review covers, so paths matching `ignore_patterns` are left out.
@@ -717,7 +719,11 @@ Jev answers are typed numbers, not generated text, so the service cannot inject 
 
 This setting is global-only: it does not exist in `.no-mistakes.yaml`, so a pushed branch cannot enable or steer the pre-screen that feeds the reviewer gating it.
 The request sent to TypeSafe carries the branch name, the base commit, the clipped diff and diff stat of the reviewable files, and the paths of up to 40 candidate files.
-It sends no content from unchanged files: candidates are paths only.
+By default it sends no content from unchanged files: candidates are paths only.
+Setting `jev.candidate_excerpt_bytes` above 0 opts into sending a bounded leading slice of each candidate file alongside its path, so the relevance question can be judged from a small slice of content rather than the path alone.
+Each excerpt holds at most that many bytes, cut at a line boundary; binary files contribute none; files matching `ignore_patterns` are still excluded entirely; and one 16 KiB per-request ceiling drops excerpts from the least-coupled candidates first, so the request stays bounded.
+The relevance question tells Jev to judge from the excerpt when one is present and from the path otherwise; listing thresholds and candidate discovery are unchanged.
+Enabling the excerpt sends bounded content of unchanged files to the TypeSafe API: leave it at 0 unless you accept that.
 The change content in it is a subset of what the review agent itself sends to its model provider, and the request leaves the machine only when you set both this flag and the key.
 The model is pinned (`jev-1.13.0`), and each request is billed per input token at [TypeSafe's published price](https://docs.typesafe.ai/models); output tokens are free.
 The local step log records how many candidates were listed, the answering model ID, and the input-token usage; none of it goes to telemetry.
