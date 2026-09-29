@@ -294,10 +294,7 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 		source := c.IntentSource
 		replayRun.IntentSource = &source
 	}
-	defaultBranch := c.DefaultBranch
-	if defaultBranch == "" {
-		defaultBranch = "main"
-	}
+	defaultBranch := replayDefaultBranch(c)
 	replayRepo := &db.Repo{ID: "eval", WorkingPath: workDir, DefaultBranch: defaultBranch}
 	step := &steps.ReviewStep{}
 	outcome, err := step.Execute(&pipeline.StepContext{
@@ -453,10 +450,7 @@ func restoreCase(ctx context.Context, store *Store, c Case, root string) (string
 	if err := restoreCaseObjects(ctx, store.poolDir(c.RepoFingerprint), gateDir, c.ID); err != nil {
 		return "", err
 	}
-	defaultBranch := c.DefaultBranch
-	if defaultBranch == "" {
-		defaultBranch = "main"
-	}
+	defaultBranch := replayDefaultBranch(c)
 	if _, err := git.Run(ctx, gateDir, "update-ref", "refs/remotes/origin/"+defaultBranch, c.TrustedConfigSHA); err != nil {
 		return "", fmt.Errorf("restore trusted default branch: %w", err)
 	}
@@ -465,6 +459,13 @@ func restoreCase(ctx context.Context, store *Store, c Case, root string) (string
 		return "", fmt.Errorf("restore review worktree: %w", err)
 	}
 	return workDir, nil
+}
+
+func replayDefaultBranch(c Case) string {
+	if branch := strings.TrimSpace(c.DefaultBranch); branch != "" {
+		return branch
+	}
+	return "main"
 }
 
 func replayConfig(c Case) (*config.Config, error) {
@@ -480,14 +481,16 @@ func replayConfig(c Case) (*config.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load captured repo config: %w", err)
 	}
-	merged := config.Merge(global, repo)
-	// Replay pins only refs/remotes/origin/<DefaultBranch> in its isolated
-	// gate and never opens a PR, so a captured pr.base_branch names a branch
-	// that does not exist here. Leaving it set makes the scoping steps resolve
-	// their base against a missing ref and silently score the replay against a
-	// different diff than the captured run.
-	merged.PR.BaseBranch = ""
-	return merged, nil
+	// A case whose captured pr.base_branch is not the repository default was
+	// reviewed against a narrower diff than Manifest.BaseSHA records (capture
+	// derives that base from the default branch), so the candidate's findings
+	// would be scored against gold labels drawn from a different diff. Capture
+	// refuses such a run now; a case stored before it did fails loudly here
+	// rather than producing a wrong score.
+	if base := strings.TrimSpace(repo.PR.BaseBranch); base != "" && base != replayDefaultBranch(c) {
+		return nil, fmt.Errorf("case %q was reviewed against base branch %q rather than the repository default %q, so its recorded diff and gold labels do not describe the same change; recapture it", c.ID, base, replayDefaultBranch(c))
+	}
+	return config.Merge(global, repo), nil
 }
 
 type observedAgent struct {
