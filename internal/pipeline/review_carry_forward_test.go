@@ -857,8 +857,9 @@ func TestResolveVerifiedFindingsJSON(t *testing.T) {
 	// lineShiftedReword is a fix that moved the defect to a different line in
 	// the same file and a rereview that restated it under a different
 	// description - matching neither the exact file+line key nor the content
-	// fingerprint. This must never read as a clean pass: any finding reported
-	// in the same file is ambiguous evidence, not positive verification.
+	// fingerprint. This must never read as a clean pass: a finding reported
+	// within the line window of the pending finding is ambiguous evidence, not
+	// positive verification.
 	lineShiftedReword := `{"findings":[{"id":"review-9","severity":"info","file":"service.go","line":11,"description":"no remaining issue in this area","action":"no-op"}],"summary":"1 finding"}`
 
 	// distantDistinct is a genuinely different defect far from the pending
@@ -870,6 +871,11 @@ func TestResolveVerifiedFindingsJSON(t *testing.T) {
 	// pending finding: close enough to be the same defect shifted by its fix
 	// and restated, so it stays ambiguous evidence like lineShiftedReword.
 	nearRestatement := `{"findings":[{"id":"review-9","severity":"warning","file":"service.go","line":14,"description":"restated concern a few lines below the original","action":"ask-user"}],"summary":"1 finding"}`
+
+	// unpositionedSameFile is a same-file report the rereview gave no line at
+	// all, so nothing places it relative to the pending finding. It reads as
+	// nearby, keeping the conservative fail-closed direction.
+	unpositionedSameFile := `{"findings":[{"id":"review-9","severity":"warning","file":"service.go","description":"same file, no line reported","action":"ask-user"}],"summary":"1 finding"}`
 
 	cases := []struct {
 		name        string
@@ -890,6 +896,7 @@ func TestResolveVerifiedFindingsJSON(t *testing.T) {
 		{name: "line-shifted reword in the same file is ambiguous, not resolution", thisRound: lineShiftedReword, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
 		{name: "distant distinct finding in the same file clears", thisRound: distantDistinct, reviewed: []string{"service.go"}, pending: []string{"review-1"}, wantCleared: true},
 		{name: "near restatement in the same file stays outstanding", thisRound: nearRestatement, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
+		{name: "same-file report with no line stays outstanding", thisRound: unpositionedSameFile, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
 	}
 
 	for _, tc := range cases {

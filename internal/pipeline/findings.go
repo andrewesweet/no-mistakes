@@ -509,39 +509,6 @@ func normalizeCoveredPath(value string) string {
 	return cleaned
 }
 
-// resolveVerifiedFindingsJSON returns outstandingRaw minus every finding whose
-// ID is in pendingIDs and for which this round is a POSITIVE verification
-// record: for a file-anchored finding, the round listed the finding's file in
-// its ReviewedPaths coverage, that path is in the trusted reviewable set, and
-// the round's own output (thisRoundRaw) neither re-reports the defect nor
-// reports anything else nearby in that same file (within
-// verifiedFindingLineWindow lines; a same-file report with no usable line
-// position reads as nearby). The file-less exception
-// below requires coverage of the entire trusted reviewable set.
-//
-// This is the only way a selected-and-fixed finding leaves the outstanding set
-// besides an explicit operator action (approve/skip/abort). A file the round
-// did not list, a missing coverage record, a round that re-reports the defect,
-// or a round that reports the defect shifted nearby in the same file all leave
-// the item in place. Any file-less finding in the current round also blocks
-// verification of every selected item in that round: silence, or
-// a round that did not look, is never resolution, and neither is a nearby
-// report that might be the same defect shifted by its fix or reworded.
-// Without this last check, a fix that moves a defect within the same file and
-// a rereview that describes it differently would both fail the exact-match and
-// content-match checks, so the defect would silently clear as "not reported"
-// even though it is still present, just relocated or restated. That is the P1
-// this closes - the predecessor dropped a selected finding the moment its fix
-// was requested, so a no-op fix could let the run complete with the defect
-// unresolved.
-//
-// One compat carve-out: a SELECTED finding with no file anchor can never match
-// a coverage record, so it clears on a positive verification round that no
-// longer reports it - the round's coverage record must list every reviewable
-// path, and the round must report no unanchored finding. Runs parked before
-// the recorded-decision review machinery was removed can carry such items (a
-// synthesized decision finding whose source finding had no file), and without
-// this rule a fix selection could never clear them.
 // verifiedFindingLineWindow is how close (in lines) a same-file finding in
 // the verification round must be to a pending finding to read as the same
 // defect shifted or restated. Anything farther away is a distinct defect in
@@ -577,6 +544,46 @@ func nearSameFileFinding(reportedLines map[string][]int, lineUnknown map[string]
 	return false
 }
 
+// resolveVerifiedFindingsJSON returns outstandingRaw minus every finding whose
+// ID is in pendingIDs and for which this round is a POSITIVE verification
+// record: for a file-anchored finding, the round listed the finding's file in
+// its ReviewedPaths coverage, that path is in the trusted reviewable set, and
+// the round's own output (thisRoundRaw) neither re-reports the defect nor
+// reports anything else nearby in that same file (within
+// verifiedFindingLineWindow lines; a same-file report with no usable line
+// position reads as nearby). The file-less exception
+// below requires coverage of the entire trusted reviewable set.
+//
+// This is the only way a selected-and-fixed finding leaves the outstanding set
+// besides an explicit operator action (approve/skip/abort). A file the round
+// did not list, a missing coverage record, a round that re-reports the defect,
+// or a round that reports the defect shifted nearby in the same file all leave
+// the item in place. Any file-less finding in the current round also blocks
+// verification of every selected item in that round: silence, or
+// a round that did not look, is never resolution, and neither is a nearby
+// report that might be the same defect shifted by its fix or reworded.
+// Without this last check, a fix that moves a defect within the same file and
+// a rereview that describes it differently would both fail the exact-match and
+// content-match checks, so the defect would silently clear as "not reported"
+// even though it is still present, just relocated or restated. That is the P1
+// this closes - the predecessor dropped a selected finding the moment its fix
+// was requested, so a no-op fix could let the run complete with the defect
+// unresolved.
+//
+// One compat carve-out: a SELECTED finding with no file anchor can never match
+// a coverage record, so it clears on a positive verification round that no
+// longer reports it - the round's coverage record must list every reviewable
+// path, and the round must report no unanchored finding. Runs parked before
+// the recorded-decision review machinery was removed can carry such items (a
+// synthesized decision finding whose source finding had no file), and without
+// this rule a fix selection could never clear them.
+//
+// The nearby-report window is measured from the pending finding's RECORDED
+// line, which is the coordinate of the round that reported it and is never
+// remapped through a later fix's edits. A restatement the fix shifted farther
+// than the window therefore clears here, but it is still present in that
+// round's own findings and is appended to the outstanding set as a new item by
+// mergeOutstandingFindingsJSON, so the defect is never silently lost.
 func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, reviewedPaths, reviewablePaths []string, thisRoundRaw string) string {
 	if outstandingRaw == "" || len(pendingIDs) == 0 || len(reviewedPaths) == 0 {
 		return outstandingRaw
