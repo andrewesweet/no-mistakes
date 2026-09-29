@@ -34,7 +34,11 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	ctx := sctx.Ctx
 	startHead := sctx.Run.HeadSHA
-	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	// Scoping follows the run's effective base branch (the one Rebase, PR and
+	// CI already use); see review.go for the stacked-layer rationale. The
+	// trusted live-validation runbook below still comes from the repository
+	// default branch.
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, effectivePRBaseBranch(sctx))
 	if err != nil {
 		return nil, err
 	}

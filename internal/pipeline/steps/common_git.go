@@ -38,14 +38,15 @@ func resolveBaseSHA(ctx context.Context, workDir, baseSHA, defaultBranch string)
 	return git.EmptyTreeSHA
 }
 
-// resolveBranchBaseSHA returns the branch base commit relative to the default
-// branch when possible. This keeps pipeline steps scoped to the full branch,
-// not just the last pushed delta. It fetches the default branch's current
-// remote tip first (same pattern as resolveRunDefaultBranchTip) so the
-// merge-base is computed against the live base, not whatever origin/<base>
-// happened to be sitting at in the worktree - a stale local ref otherwise
-// drafts PR content (and other consumers) against an outdated base and pulls
-// in unrelated commits that already landed there.
+// resolveBranchBaseSHA returns the branch base commit relative to the given
+// base branch - the caller's effective base branch: the per-run --base-branch,
+// else trusted pr.base_branch, else the repository default. This keeps
+// pipeline steps scoped to the full branch, not just the last pushed delta. It
+// fetches that base branch's current remote tip first (same pattern as
+// resolveRunDefaultBranchTip) so the merge-base is computed against the live
+// base, not whatever origin/<base> happened to be sitting at in the worktree -
+// a stale local ref otherwise drafts PR content (and other consumers) against
+// an outdated base and pulls in unrelated commits that already landed there.
 //
 // A fetch failure is refused rather than degraded: falling back to the
 // worktree's cached origin/<base> ref on fetch failure would silently
@@ -57,7 +58,7 @@ func resolveBranchBaseSHA(ctx context.Context, sctx *pipeline.StepContext, fallb
 	// captured commit in its isolated worktree, which is the base to use.
 	if strings.TrimSpace(defaultBranch) != "" && !sctx.EvalReplay {
 		if err := fetchRunUpstreamBranch(ctx, sctx, defaultBranch); err != nil {
-			return "", fmt.Errorf("fetch default branch %q to resolve branch base: %w", defaultBranch, err)
+			return "", fmt.Errorf("fetch base branch %q to resolve branch base: %w", defaultBranch, err)
 		}
 	}
 	if mb := mergeBaseWithDefaultBranch(ctx, sctx.WorkDir, defaultBranch); mb != "" {

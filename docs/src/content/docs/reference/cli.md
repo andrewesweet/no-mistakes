@@ -164,7 +164,7 @@ Only attached runs receive plan-aware guidance. Review and Test assess the propo
 
 ### Other run options
 
-`--base-branch` is persisted on the run so rebase, PR, and CI honor it after resume.
+`--base-branch` is persisted on the run as its effective base branch, so rebase, PR, and CI honor it after resume, along with every validation step that scopes its work to the branch's changes (Review, Test, Document, Lint, and repository gate fixes).
 Reattaching with a `--base-branch` that differs from the active run's stored target is refused rather than silently discarded; omit the flag to reattach, or abort the active run first.
 `--no-publish-intent` is likewise persisted on the run, and reattaching with it against an active run started without it is refused rather than silently discarded; omit the flag to reattach, or abort the active run first.
 Before starting a run that may omit the section (this flag set, the global `intent.publish_intent` default `false`, or a global config that cannot be read), `axi run` probes the running daemon for the capability and refuses to start anything when that daemon is too old to honor it (an older daemon would silently drop the field, never read the global default, and publish); restart the daemon with the current binary. Only a run that cannot omit (flag unset, global default `true`) may reuse an older daemon. `rerun` always probes, because it inherits omission from the selected prior run and only the daemon knows that selection.

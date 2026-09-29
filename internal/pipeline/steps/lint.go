@@ -20,7 +20,9 @@ func (s *LintStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, err
 	}
 	ctx := sctx.Ctx
-	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	// Scoping follows the run's effective base branch (the one Rebase, PR and
+	// CI already use); see review.go for the stacked-layer rationale.
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, effectivePRBaseBranch(sctx))
 	if err != nil {
 		return nil, err
 	}
