@@ -34,7 +34,7 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// CI already use - so a stacked layer is reviewed against its parent branch
 	// and never re-reviews lower layers. Trusted material below still comes
 	// from the repository default branch.
-	baseBranch := effectivePRBaseBranch(sctx)
+	baseBranch := scopingBaseBranch(sctx)
 	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
 	if err != nil {
 		return nil, err

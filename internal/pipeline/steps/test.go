@@ -38,7 +38,7 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	// CI already use); see review.go for the stacked-layer rationale. The
 	// trusted live-validation runbook below still comes from the repository
 	// default branch.
-	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, effectivePRBaseBranch(sctx))
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, scopingBaseBranch(sctx))
 	if err != nil {
 		return nil, err
 	}

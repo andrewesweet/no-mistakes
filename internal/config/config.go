@@ -406,6 +406,14 @@ type PRRaw struct {
 	// repository explicitly opts into pushed-branch settings with
 	// allow_repo_commands.
 	BaseBranch string `yaml:"base_branch"`
+	// ScopingBaseBranch is the trusted default-branch copy's base_branch,
+	// carried separately because the validation steps scope the diff they gate
+	// against it. It is never read from YAML and stays trusted-only even when
+	// allow_repo_commands lets the pushed branch pick the PR target: a pushed
+	// branch that could move the scoping base would hide its own commits from
+	// the review, test and lint gates and from trusted review.path_instructions
+	// selection.
+	ScopingBaseBranch string `yaml:"-"`
 	// Template, PublishIntent, and Appendix are repository-only publication
 	// policy. All three remain trusted-only even when allow_repo_commands is
 	// enabled. Appendix empty means full.
@@ -810,7 +818,10 @@ type AzureDevOpsProvider struct {
 // PR is the resolved pull-request configuration.
 type PR struct {
 	BaseBranch string
-	Template   string
+	// ScopingBaseBranch is the trusted-only base branch the validation steps
+	// scope their diff against. Empty means the repository default branch.
+	ScopingBaseBranch string
+	Template          string
 	// Nil preserves the historical default: publish the extracted intent.
 	PublishIntent *bool
 	// Appendix is full, collapsed, or minimal. Empty preserves full.
@@ -2606,7 +2617,9 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		pushed = &RepoConfig{}
 	}
 	effective := *pushed
+	effective.PR.ScopingBaseBranch = ""
 	if trusted != nil {
+		effective.PR.ScopingBaseBranch = strings.TrimSpace(trusted.PR.BaseBranch)
 		effective.Document = trusted.Document
 		effective.ProtectedPaths = append([]string(nil), trusted.ProtectedPaths...)
 		// review.path_instructions steers the gate agent that reviews the pushed
@@ -3158,10 +3171,11 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	applyProvidersOverrides(&providers, &repo.Providers)
 
 	pr := PR{
-		BaseBranch:    strings.TrimSpace(repo.PR.BaseBranch),
-		Template:      repo.PR.Template,
-		PublishIntent: repo.PR.PublishIntent,
-		Appendix:      repo.PR.Appendix,
+		BaseBranch:        strings.TrimSpace(repo.PR.BaseBranch),
+		ScopingBaseBranch: strings.TrimSpace(repo.PR.ScopingBaseBranch),
+		Template:          repo.PR.Template,
+		PublishIntent:     repo.PR.PublishIntent,
+		Appendix:          repo.PR.Appendix,
 	}
 	if override != nil && override.PR.TitleFormat != nil {
 		pr.TitleFormat = *override.PR.TitleFormat

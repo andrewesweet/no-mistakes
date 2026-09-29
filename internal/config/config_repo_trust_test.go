@@ -345,6 +345,33 @@ func TestEffectiveRepoConfig_PRBaseBranchTrustedOnly(t *testing.T) {
 	}
 }
 
+// The scoping base the validation steps gate against comes from the trusted
+// default-branch copy whatever allow_repo_commands says, so a pushed branch
+// cannot move the diff its own review, test and lint gates see.
+func TestEffectiveRepoConfig_ScopingBaseBranchIsAlwaysTrusted(t *testing.T) {
+	pushed := &RepoConfig{PR: PRRaw{BaseBranch: "feature-selected"}}
+	trusted := &RepoConfig{PR: PRRaw{BaseBranch: "develop"}}
+
+	for _, allowRepoCommands := range []bool{false, true} {
+		got := EffectiveRepoConfig(pushed, trusted, allowRepoCommands)
+		if got.PR.ScopingBaseBranch != "develop" {
+			t.Fatalf("allow_repo_commands=%v: PR.ScopingBaseBranch = %q, want the trusted branch", allowRepoCommands, got.PR.ScopingBaseBranch)
+		}
+	}
+
+	got := EffectiveRepoConfig(pushed, &RepoConfig{}, true)
+	if got.PR.ScopingBaseBranch != "" {
+		t.Fatalf("PR.ScopingBaseBranch = %q, want empty when the trusted copy configures none", got.PR.ScopingBaseBranch)
+	}
+	got = EffectiveRepoConfig(pushed, nil, true)
+	if got.PR.ScopingBaseBranch != "" {
+		t.Fatalf("PR.ScopingBaseBranch = %q, want empty with no trusted copy at all", got.PR.ScopingBaseBranch)
+	}
+	if merged := Merge(&GlobalConfig{}, EffectiveRepoConfig(pushed, trusted, true)); merged.PR.ScopingBaseBranch != "develop" || merged.PR.BaseBranch != "feature-selected" {
+		t.Fatalf("merged PR = %#v, want trusted scoping base with the pushed PR target", merged.PR)
+	}
+}
+
 func TestEffectiveRepoConfig_PRBaseBranchOptInUsesPushedValue(t *testing.T) {
 	pushed := &RepoConfig{PR: PRRaw{BaseBranch: "develop"}}
 	trusted := &RepoConfig{AllowRepoCommands: true}

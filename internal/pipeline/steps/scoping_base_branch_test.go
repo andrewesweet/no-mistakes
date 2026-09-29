@@ -151,7 +151,7 @@ func TestReviewStep_ScopesToTrustedPRBaseBranch(t *testing.T) {
 	sctx := stackedSctx(t, ag, dir, upstream, mainTip, headTip, config.Commands{})
 	// No per-run base: the trusted pr.base_branch selects the scope branch.
 	sctx.Run.PRBaseBranch = nil
-	sctx.Config.PR.BaseBranch = "epic/feature"
+	sctx.Config.PR.ScopingBaseBranch = "epic/feature"
 
 	outcome, err := (&ReviewStep{}).Execute(sctx)
 	if err != nil {
@@ -292,4 +292,53 @@ func TestCustomGateStep_FixTurnScopesToPerRunBaseBranch(t *testing.T) {
 		t.Fatalf("agent calls = %d, want exactly the fix turn", len(ag.calls))
 	}
 	assertScopedBaseCommit(t, ag.calls[0].Prompt, epicTip, mainTip)
+}
+
+// Under allow_repo_commands the pushed branch supplies pr.base_branch for PR
+// targeting, but it must never move the gate's own diff scope: a pushed value
+// that narrowed the scope would hide the commits it points past from Review,
+// and from the trusted review.path_instructions matched against the changed
+// set. Scoping keeps using the trusted value (here absent), so the layer is
+// reviewed against the repository default branch and the parent layer's file
+// stays in scope.
+func TestReviewStep_PushedPRBaseBranchDoesNotMoveTheScope(t *testing.T) {
+	t.Parallel()
+	dir, upstream, mainTip, epicTip, headTip := setupStackedRepo(t)
+
+	cleanReview := `{"findings":[],"reviewed_paths":["epic.txt","task.txt"],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`
+	var prompt string
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			prompt = opts.Prompt
+			return &agent.Result{Output: json.RawMessage(cleanReview)}, nil
+		},
+	}
+	sctx := stackedSctx(t, ag, dir, upstream, mainTip, headTip, config.Commands{})
+	sctx.Run.PRBaseBranch = nil
+	// What allow_repo_commands lets the pushed branch set, with no trusted
+	// default-branch value behind it.
+	sctx.Config.PR.BaseBranch = "epic/feature"
+	sctx.Config.PR.ScopingBaseBranch = ""
+	sctx.Config.Review.PathInstructions = []config.PathInstruction{{Path: "epic.txt", Instructions: "audit the epic layer"}}
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("unexpected approval: %s", outcome.Findings)
+	}
+	if len(outcome.ReviewablePaths) != 2 {
+		t.Fatalf("reviewable paths = %v, want both the epic and task files", outcome.ReviewablePaths)
+	}
+	if !strings.Contains(prompt, "base commit: "+mainTip) {
+		t.Errorf("a pushed pr.base_branch moved the scope off the repository default tip %s:\n%s", mainTip, prompt)
+	}
+	if strings.Contains(prompt, "base commit: "+epicTip) {
+		t.Errorf("a pushed pr.base_branch narrowed the review scope to %s:\n%s", epicTip, prompt)
+	}
+	if !strings.Contains(prompt, "audit the epic layer") {
+		t.Errorf("trusted path instructions for the hidden file were not selected:\n%s", prompt)
+	}
 }

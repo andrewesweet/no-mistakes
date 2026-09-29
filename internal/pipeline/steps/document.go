@@ -94,7 +94,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	// CI already use); see review.go for the stacked-layer rationale. The
 	// trusted documentation ownership policy below still comes from the
 	// repository default branch.
-	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, effectivePRBaseBranch(sctx))
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, scopingBaseBranch(sctx))
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +256,7 @@ Rules:
 		sctx.Run.Branch,
 		baseSHA,
 		sctx.Run.HeadSHA,
-		effectivePRBaseBranch(sctx),
+		scopingBaseBranch(sctx),
 		ignorePatterns,
 		documentPlacementPolicy,
 		documentScopeDiscipline,
