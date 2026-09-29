@@ -60,7 +60,7 @@ It can fail the run only if cleanup fails after the disambiguation agent leaves 
 
 Fetches the latest authoritative remote state, fetches the configured pushed-branch target, and integrates your branch with those refs - by rebasing onto them, or by merging them in when [`rebase.strategy: merge`](/no-mistakes/reference/repo-config/#rebasestrategy) is configured.
 
-The integration branch used below is the [PR base branch](/no-mistakes/reference/repo-config/#prbase_branch): the repository's forge default branch, or the trusted [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) when configured.
+The integration branch used below is the [PR base branch](/no-mistakes/reference/repo-config/#prbase_branch): the per-run `--base-branch` override when set, else the trusted [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) when configured, else the repository's forge default branch.
 
 **Behavior:**
 - Fetches `origin/<PR base branch>` from the remote into the worktree, and also fetches the pushed branch for non-base branches unless the push rewrote branch history. A failed base-branch fetch fails the step before any rebase or head update, rather than integrating against a possibly stale cached `origin/<PR base branch>`; the post-integration empty-diff check reuses that same fetched ref
@@ -254,7 +254,7 @@ This step never requires approval - it runs automatically after review, test, do
 Creates or updates a pull request.
 
 **Skipped when:**
-- The branch is the [PR base branch](/no-mistakes/reference/repo-config/#prbase_branch) (the repository's forge default branch, or the trusted `pr.base_branch` when configured)
+- The branch is the [PR base branch](/no-mistakes/reference/repo-config/#prbase_branch) (the per-run `--base-branch` override when set, else the trusted `pr.base_branch` when configured, else the repository's forge default branch)
 - The upstream host is not GitHub, GitLab, Forgejo, Bitbucket Cloud (`bitbucket.org`), Azure DevOps (`dev.azure.com` / `*.visualstudio.com`), or Gitea
 - The provider CLI (`gh`, `glab`, `forgejo-axi`, or `tea`) is not installed for GitHub, GitLab, Forgejo, or Gitea (GitHub also skips when `gh` is missing from `PATH`)
 - The provider CLI is not authenticated for GitHub, GitLab, Forgejo, or Gitea (GitHub reports a timed-out or interrupted `gh auth status` separately from auth failure; either still skips)
