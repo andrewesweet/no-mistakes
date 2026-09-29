@@ -386,7 +386,7 @@ func replayRoundContext(p *paths.Paths, c Case, workDir string) (*db.DB, string,
 		database.Close()
 		return nil, "", false, "", err
 	}
-	repo, err := database.InsertRepoWithID("eval-repo", workDir, "local://eval", c.DefaultBranch)
+	repo, err := database.InsertRepoWithID("eval-repo", workDir, "local://eval", replayDefaultBranch(c))
 	if err != nil {
 		return fail(fmt.Errorf("create isolated replay repository: %w", err))
 	}
