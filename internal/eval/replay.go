@@ -480,7 +480,14 @@ func replayConfig(c Case) (*config.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load captured repo config: %w", err)
 	}
-	return config.Merge(global, repo), nil
+	merged := config.Merge(global, repo)
+	// Replay pins only refs/remotes/origin/<DefaultBranch> in its isolated
+	// gate and never opens a PR, so a captured pr.base_branch names a branch
+	// that does not exist here. Leaving it set makes the scoping steps resolve
+	// their base against a missing ref and silently score the replay against a
+	// different diff than the captured run.
+	merged.PR.BaseBranch = ""
+	return merged, nil
 }
 
 type observedAgent struct {
