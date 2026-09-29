@@ -551,8 +551,8 @@ func nearSameFileFinding(reportedLines map[string][]int, lineUnknown map[string]
 // the round's own output (thisRoundRaw) neither re-reports the defect nor
 // reports anything else nearby in that same file (within
 // verifiedFindingLineWindow lines; a same-file report with no usable line
-// position reads as nearby). The file-less exception
-// below requires coverage of the entire trusted reviewable set.
+// position reads as nearby). The file-less exception below requires coverage
+// of the entire trusted reviewable set.
 //
 // This is the only way a selected-and-fixed finding leaves the outstanding set
 // besides an explicit operator action (approve/skip/abort). A file the round
@@ -562,10 +562,10 @@ func nearSameFileFinding(reportedLines map[string][]int, lineUnknown map[string]
 // verification of every selected item in that round: silence, or
 // a round that did not look, is never resolution, and neither is a nearby
 // report that might be the same defect shifted by its fix or reworded.
-// Without this last check, a fix that moves a defect within the same file and
-// a rereview that describes it differently would both fail the exact-match and
-// content-match checks, so the defect would silently clear as "not reported"
-// even though it is still present, just relocated or restated. That is the P1
+// Without this last check, a fix that moves a defect a few lines within the
+// same file and a rereview that describes it differently would both fail the
+// exact-match and content-match checks, so the defect would silently clear as
+// "not reported" even though it is still present, just relocated or restated. That is the P1
 // this closes - the predecessor dropped a selected finding the moment its fix
 // was requested, so a no-op fix could let the run complete with the defect
 // unresolved.
