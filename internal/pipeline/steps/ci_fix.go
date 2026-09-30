@@ -743,6 +743,16 @@ func ciRepairContinuityGap(sctx *pipeline.StepContext, headSHA string) string {
 // Review. note is the log line to write; the empty note keeps the repair log
 // line, while the head-adoption path names its adopted head instead.
 func (s *CIStep) recordLocalRepair(sctx *pipeline.StepContext, headSHA, note string) (ciRepairResult, error) {
+	return s.recordRevalidationHead(sctx, headSHA, note, true)
+}
+
+// recordRevalidationHead advances the run onto headSHA for revalidation.
+// pipelineAuthored says whose commits those are: a repair's are the fixer's, so
+// the range is persisted as an uncertified pipeline range and Review is told so;
+// an ADOPTED head's are not - they were written outside the run by the rewrite
+// that moved the branch - and claiming them would hand the reviewer a wrong
+// authorship label and the revert-to-minimal-fix ramp over the author's own work.
+func (s *CIStep) recordRevalidationHead(sctx *pipeline.StepContext, headSHA, note string, pipelineAuthored bool) (ciRepairResult, error) {
 	startingHead := sctx.Run.HeadSHA
 	if err := updateNonSharedBranchRef(sctx, headSHA); err != nil {
 		return ciRepairResult{}, err
@@ -756,7 +766,9 @@ func (s *CIStep) recordLocalRepair(sctx *pipeline.StepContext, headSHA, note str
 	}
 	sctx.Run.HeadSHA = headSHA
 	sctx.Run.ReviewApprovedHeadSHA = nil
-	pipeline.PersistUncertifiedPipelineRange(sctx, startingHead, headSHA)
+	if pipelineAuthored {
+		pipeline.PersistUncertifiedPipelineRange(sctx, startingHead, headSHA)
+	}
 	if note != "" {
 		sctx.Log(note)
 	} else {

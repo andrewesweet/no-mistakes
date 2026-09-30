@@ -158,7 +158,7 @@ func (s *CIStep) adoptPublishedHeadRewrite(sctx *pipeline.StepContext, host scm.
 	if _, err := stepGitRun(sctx, "reset", "--hard", target); err != nil {
 		return nil, fmt.Errorf("move the run worktree to the adopted head %s: %w", shortSHA(target), err)
 	}
-	if _, err := s.recordLocalRepair(sctx, target, fmt.Sprintf("adopted rewritten pull request head %s (superseding %s); revalidation from Review required", shortSHA(target), shortSHA(recorded))); err != nil {
+	if _, err := s.recordRevalidationHead(sctx, target, fmt.Sprintf("adopted rewritten pull request head %s (superseding %s); revalidation from Review required", shortSHA(target), shortSHA(recorded)), false); err != nil {
 		return nil, err
 	}
 	if err := applyRunPRBase(sctx, liveBase); err != nil {
@@ -230,9 +230,15 @@ func resolveLivePRBase(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) (s
 }
 
 // applyRunPRBase sets the run's persisted per-run base to the base
-// resolveLivePRBase read, whenever the two differ. Without it a restarted
-// Review scopes the change against a branch the pull request no longer
-// targets, and a retargeted layer loses its layer-only diff.
+// resolveLivePRBase read, whenever that differs from the base configuration
+// already resolves to. Without it a restarted Review scopes the change against
+// a branch the pull request no longer targets, and a retargeted layer loses its
+// layer-only diff. The comparison is against the EFFECTIVE base, not the
+// per-run override alone: writing the override when the two already agree
+// materialises an operator-style choice nobody made, and every consumer that
+// reads "the operator picked a base" from a non-empty per-run value would then
+// act on it - reverting a maintainer's forge-side retarget, and failing a run
+// whose persisted pull request has since been closed.
 func applyRunPRBase(sctx *pipeline.StepContext, liveBase string) error {
 	if liveBase == "" {
 		return nil
@@ -241,7 +247,7 @@ func applyRunPRBase(sctx *pipeline.StepContext, liveBase string) error {
 	if err != nil {
 		return fmt.Errorf("the pull request's live base branch is not a usable branch name: %w", err)
 	}
-	current := runPRBaseBranch(sctx)
+	current := effectivePRBaseBranch(sctx)
 	if current == liveBase {
 		return nil
 	}

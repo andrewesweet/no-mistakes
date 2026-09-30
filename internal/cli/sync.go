@@ -435,6 +435,9 @@ func humanSyncSummary(state branchsync.State) string {
 		}
 		return "diverged from the pipeline-pushed head; manual reconciliation required"
 	case branchsync.StateSynchronized:
+		if state.BoundHeadValidationUnknown {
+			return "synchronized, but whether any run validated the push-bound head could not be read; start a validation run on it before trusting it"
+		}
 		if state.BoundHeadUnvalidated != "" {
 			return "the branch equals a push-bound head no run validated; start a validation run on it before trusting it"
 		}
@@ -635,6 +638,12 @@ func branchSyncField(state branchsync.State) toON.Field {
 	// structured output never mistakes the branch for validated work.
 	if state.BoundHeadUnvalidated != "" {
 		fields = append(fields, toON.Field{Key: "bound_head_unvalidated", Value: state.BoundHeadUnvalidated})
+	}
+	// A completed synchronization whose marker could not be read is reported as
+	// successful, so the unknown validation state has to travel with it or an
+	// agent reads the branch as validated work.
+	if state.BoundHeadValidationUnknown {
+		fields = append(fields, toON.Field{Key: "bound_head_validation_unknown", Value: true})
 	}
 	if state.Recovery != nil {
 		fields = append(fields, toON.Field{Key: "recovery", Value: toON.NewObject(

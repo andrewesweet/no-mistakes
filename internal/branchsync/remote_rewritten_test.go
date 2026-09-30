@@ -706,12 +706,13 @@ func TestSyncOntoAReboundUnvalidatedHeadKeepsSayingSo(t *testing.T) {
 	}
 }
 
-// Apply's own report consumes the marker for its verdict, so it must know
-// whether the read succeeded: a fast-forward that lands the branch exactly on
-// the rebound head while the marker is unreadable can neither be called
-// synchronized nor be called unvalidated, and reporting the former hands the
-// operator a head no run validated as finished work.
-func TestApplyOntoAReboundHeadRefusesWhenTheMarkerIsUnreadable(t *testing.T) {
+// A synchronization that COMPLETED is never turned into a refusal by a
+// reporting-only marker: the fast-forward landed the branch exactly on the
+// rebound head, so the report is successful. It still must not call that head
+// validated - the marker read failed - so it says the validation state is
+// unknown and offers the validation run, the same next action the unvalidated
+// case gives.
+func TestApplyOntoAReboundHeadReportsAnUnknownValidationState(t *testing.T) {
 	t.Parallel()
 
 	f, _ := newRemoteRewrittenFixture(t)
@@ -740,10 +741,47 @@ func TestApplyOntoAReboundHeadRefusesWhenTheMarkerIsUnreadable(t *testing.T) {
 	if state.Local.Head != rewritten {
 		t.Fatalf("local head = %s, want the fast-forward to have reached %s", state.Local.Head, rewritten)
 	}
-	if state.Safety != "blocked_rebound_marker_unreadable" || state.State != StateAmbiguousContext {
-		t.Fatalf("state = %#v, want the unreadable marker to refuse the synchronized verdict", state)
+	if state.State != StateSynchronized {
+		t.Fatalf("state = %#v, want the completed synchronization reported as successful", state)
 	}
-	if state.NextAction == nil || state.NextAction.Code != "retry" {
-		t.Fatalf("next action = %#v, want the re-check offered", state.NextAction)
+	if !state.BoundHeadValidationUnknown || state.Safety != SafetyValidationUnknown {
+		t.Fatalf("state = %#v, want the unknown validation state recorded instead of a plain synchronized", state)
+	}
+	if state.Error == "" {
+		t.Fatalf("state = %#v, want the report to say why the validation state is unknown", state)
+	}
+	if state.NextAction == nil || state.NextAction.Code != "validate_rebound_head" {
+		t.Fatalf("next action = %#v, want the validation run offered", state.NextAction)
+	}
+}
+
+// The same rule for the rebind itself: a compare-and-swap that COMMITTED is a
+// recovery, so a marker read that failed afterwards must not report it as an
+// ambiguous context whose owner changed.
+func TestRecoverReportsAnUnknownValidationStateRatherThanLosingTheRebind(t *testing.T) {
+	t.Parallel()
+
+	f, rewritten := newRemoteRewrittenFixture(t)
+	// The operator's branch already sits on the rewritten head, so the
+	// post-rebind inspection classifies the equal relation - the one relation
+	// whose verdict the marker decides.
+	mustRun(t, f.local, "fetch", f.remote, "feature/sync")
+	mustRun(t, f.local, "reset", "--hard", "FETCH_HEAD")
+
+	raw, err := sql.Open("sqlite", filepath.Join(filepath.Dir(f.local), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+
+	recovered := f.service.Recover(f.ctx, false)
+	if !recovered.Recovered {
+		t.Fatalf("recover = %#v, want the rebind reported as recovered", recovered)
+	}
+	if recovered.BoundHeadUnvalidated != rewritten {
+		t.Fatalf("BoundHeadUnvalidated = %q, want the rebound head %s", recovered.BoundHeadUnvalidated, rewritten)
+	}
+	if recovered.NextAction == nil || recovered.NextAction.Code != "validate_rebound_head" {
+		t.Fatalf("next action = %#v, want the validation run offered", recovered.NextAction)
 	}
 }

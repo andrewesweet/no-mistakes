@@ -683,8 +683,11 @@ func TestCIStep_TransientBaseReadStillRestartsTheRepairAtReview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.PRBaseBranch == nil || *run.PRBaseBranch != "main" {
-		t.Fatalf("persisted base = %v, want the live base read at the restart", run.PRBaseBranch)
+	// The live base equals what configuration already resolves to, so nothing
+	// is persisted; what this pins is that the retry succeeded and the restart
+	// happened at all, instead of the stale read failing the run.
+	if run.PRBaseBranch != nil {
+		t.Fatalf("persisted base = %q, want no override for a base configuration already resolves to", *run.PRBaseBranch)
 	}
 	if run.HeadSHA == f.headSHA {
 		t.Fatalf("recorded head = %s, want the repair commit recorded", run.HeadSHA)
@@ -718,5 +721,41 @@ func TestApplyRunPRBase_RefusesAnUnusableBranchName(t *testing.T) {
 	}
 	if run.PRBaseBranch == nil || *run.PRBaseBranch != "develop" {
 		t.Fatalf("persisted base = %v, want develop", run.PRBaseBranch)
+	}
+}
+
+// The per-run base is an operator-style override: several consumers read a
+// non-empty value as "the operator picked this base" and act on it - reverting
+// a maintainer's forge-side retarget, and refusing a run whose persisted pull
+// request has since closed. Aligning with the live base must therefore write it
+// only when the live base actually differs from what configuration already
+// resolves to, not merely from the (usually empty) override.
+func TestApplyRunPRBase_OnlyMaterialisesADifferentBase(t *testing.T) {
+	t.Parallel()
+
+	f := newCIRepairFixture(t, true, nil)
+	effective := effectivePRBaseBranch(f.sctx)
+	if effective == "" {
+		t.Fatalf("fixture has no effective base to compare against")
+	}
+	if err := applyRunPRBase(f.sctx, effective); err != nil {
+		t.Fatalf("applyRunPRBase() error = %v", err)
+	}
+	run, err := f.sctx.DB.GetRun(f.sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PRBaseBranch != nil {
+		t.Fatalf("persisted base = %q, want no per-run override for a base configuration already resolves to", *run.PRBaseBranch)
+	}
+	if err := applyRunPRBase(f.sctx, "develop"); err != nil {
+		t.Fatalf("applyRunPRBase() error = %v", err)
+	}
+	run, err = f.sctx.DB.GetRun(f.sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PRBaseBranch == nil || *run.PRBaseBranch != "develop" {
+		t.Fatalf("persisted base = %v, want the retargeted base develop recorded", run.PRBaseBranch)
 	}
 }

@@ -219,7 +219,7 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 	if err != nil {
 		return fmt.Sprintf("could not read the parked CI gate findings: %v", err), nil
 	}
-	if pipeline.HasCIHeadRewriteRefusal(parked) {
+	if s.headRewriteOverrideReason(sctx, parked, "") != "" {
 		liveHead, headErr := publishedBranchHead(sctx)
 		if headErr != nil {
 			liveHead = ""

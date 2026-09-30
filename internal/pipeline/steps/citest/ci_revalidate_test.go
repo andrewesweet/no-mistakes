@@ -89,7 +89,7 @@ func TestCIStep_AdoptsAPublishedHeadRewriteAndRestartsAtReview(t *testing.T) {
 	for _, want := range []string{
 		"pull request branch head moved outside the run (",
 		"adopted rewritten pull request head " + short(rewritten),
-		`run base branch updated to the pull request's live base "develop" (was "")`,
+		`run base branch updated to the pull request's live base "develop" (was "main")`,
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("log is missing %q:\n%s", want, joined)
@@ -468,4 +468,36 @@ func TestCIStep_HeadRewriteOutcomesCarryTheDeferredFindings(t *testing.T) {
 			t.Fatalf("findings = %+v, want the operator's unselected finding carried on the restart", findings.Items)
 		}
 	})
+}
+
+// The commits between the recorded head and an adopted head were written
+// outside the run by the rewrite that moved the branch, so the adoption must
+// not persist them as an uncertified PIPELINE range: Review would then be told
+// they were "authored by a previous run's fixer" and offered the
+// revert-to-minimal-fix ramp over the author's own work.
+func TestCIStep_AdoptionDoesNotClaimTheForeignCommitsAsPipelineAuthored(t *testing.T) {
+	t.Parallel()
+	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+	rewritten := pushDescendantRewrite(t, dir)
+
+	env := revalidateEnv(t, `[{"name":"test","state":"SUCCESS","bucket":"pass"}]`, "develop")
+	_, sctx, _ := revalidateContext(t, dir, upstream, baseSHA, headSHA, env)
+
+	outcome, err := (&steps.CIStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("adoption returned error: %v", err)
+	}
+	if outcome == nil || outcome.RestartFrom != types.StepReview {
+		t.Fatalf("outcome = %#v, want a restart from Review", outcome)
+	}
+	if sctx.Run.HeadSHA != rewritten {
+		t.Fatalf("run head = %s, want the adopted %s", sctx.Run.HeadSHA, rewritten)
+	}
+	rng, err := sctx.DB.GetUncertifiedPipelineRange(sctx.Repo.ID, sctx.Run.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rng != nil {
+		t.Fatalf("uncertified pipeline range = %+v, want none: the adopted commits are not the pipeline's", rng)
+	}
 }
