@@ -501,3 +501,46 @@ func TestCIStep_AdoptionDoesNotClaimTheForeignCommitsAsPipelineAuthored(t *testi
 		t.Fatalf("uncertified pipeline range = %+v, want none: the adopted commits are not the pipeline's", rng)
 	}
 }
+
+// A live-base read the forge does not answer says nothing about the head, so it
+// is treated like every other failed read in the adoption: warn and let the next
+// poll try again. Failing the run there abandoned a run that had not mutated
+// anything yet over a transport blip. An empty-but-successful base and an
+// unusable branch name stay hard failures - those are permanent.
+func TestCIStep_AdoptionWaitsWhenTheLiveBaseReadFails(t *testing.T) {
+	t.Parallel()
+	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+	rewritten := pushDescendantRewrite(t, dir)
+
+	env := revalidateEnv(t, `[{"name":"test","state":"SUCCESS","bucket":"pass"}]`, "!")
+	_, sctx, logs := revalidateContext(t, dir, upstream, baseSHA, headSHA, env)
+
+	polls := 0
+	step := (&steps.CIStep{}).SetWaitForNextPoll(func(ctx context.Context, interval time.Duration) error {
+		polls++
+		if polls >= 2 {
+			return errors.New("stop polling")
+		}
+		return nil
+	})
+	outcome, err := step.Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "stop polling") {
+		t.Fatalf("outcome = %#v, err = %v, want the monitor to have kept polling", outcome, err)
+	}
+	joined := strings.Join(*logs, "\n")
+	for _, want := range []string{"not adopting " + short(rewritten), "this poll", "live base branch could not be read"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("log is missing %q:\n%s", want, joined)
+		}
+	}
+	if got := stepstest.GitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("worktree head = %s, want the validated %s untouched", got, headSHA)
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.HeadSHA != headSHA || run.PRBaseBranch != nil {
+		t.Fatalf("run = {head %s, base %v}, want both untouched", run.HeadSHA, run.PRBaseBranch)
+	}
+}

@@ -759,3 +759,47 @@ func TestApplyRunPRBase_OnlyMaterialisesADifferentBase(t *testing.T) {
 		t.Fatalf("persisted base = %v, want the retargeted base develop recorded", run.PRBaseBranch)
 	}
 }
+
+// The restart is scoped by scopingBaseBranch, so that is the base the alignment
+// has to compare against. A repo that opts into allow_repo_commands with a
+// PUSHED pr.base_branch names a PR target the scoping base deliberately ignores:
+// comparing against the effective base saw "layer1 == layer1" and persisted
+// nothing, and the restarted Review then scoped the retargeted layer against
+// main and re-reviewed every layer beneath it.
+func TestApplyRunPRBase_AlignsTheBaseTheRestartScopesBy(t *testing.T) {
+	t.Parallel()
+
+	f := newCIRepairFixture(t, true, nil)
+	f.sctx.Config.PR.BaseBranch = "layer1"
+	f.sctx.Config.PR.ScopingBaseBranch = ""
+	if got := effectivePRBaseBranch(f.sctx); got != "layer1" {
+		t.Fatalf("effective base = %q, want the pushed layer1", got)
+	}
+	if got := scopingBaseBranch(f.sctx); got == "layer1" {
+		t.Fatalf("scoping base = %q, want the pushed value ignored before the alignment", got)
+	}
+
+	if err := applyRunPRBase(f.sctx, "layer1"); err != nil {
+		t.Fatalf("applyRunPRBase() error = %v", err)
+	}
+	if got := scopingBaseBranch(f.sctx); got != "layer1" {
+		t.Fatalf("scoping base = %q, want the restart scoped to the layer the PR targets", got)
+	}
+	run, err := f.sctx.DB.GetRun(f.sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PRBaseBranch == nil || *run.PRBaseBranch != "layer1" {
+		t.Fatalf("persisted base = %v, want layer1 recorded for the restart", run.PRBaseBranch)
+	}
+
+	// Equal to what the restart already scopes by: nothing to align.
+	f.sctx.Run.PRBaseBranch = nil
+	f.sctx.Config.PR.BaseBranch = ""
+	if err := applyRunPRBase(f.sctx, scopingBaseBranch(f.sctx)); err != nil {
+		t.Fatalf("applyRunPRBase() error = %v", err)
+	}
+	if f.sctx.Run.PRBaseBranch != nil {
+		t.Fatalf("in-memory base = %q, want no write when the scoping base already agrees", *f.sctx.Run.PRBaseBranch)
+	}
+}

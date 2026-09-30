@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -152,6 +153,10 @@ func (s *CIStep) adoptPublishedHeadRewrite(sctx *pipeline.StepContext, host scm.
 		return ciTerminalRepairOutcome(park, Findings{}, sctx.DeferredFindings), nil
 	}
 	liveBase, err := resolveLivePRBase(sctx, host, pr)
+	if errors.Is(err, errLivePRBaseUnread) {
+		sctx.Log(fmt.Sprintf("warning: not adopting %s this poll: %v", shortSHA(target), err))
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -205,6 +210,13 @@ func fetchVerifiedPublishedHead(sctx *pipeline.StepContext) (string, error) {
 	return "", lastErr
 }
 
+// errLivePRBaseUnread marks a live-base read the forge did not answer -
+// transport, auth, or rate limit. It says nothing about the head, so the
+// adoption treats it the way it treats every other failed read in that
+// function: warn and let the next poll try again. A successful read reporting
+// no base, or an unusable branch name, is permanent and still fails closed.
+var errLivePRBaseUnread = errors.New("the pull request's live base branch could not be read")
+
 // resolveLivePRBase reads the pull request's live forge base. Every CI path
 // that can restart at Review resolves it BEFORE it mutates anything, so a base
 // the forge will not report fails the step closed while the run still sits on
@@ -217,7 +229,7 @@ func resolveLivePRBase(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) (s
 	}
 	liveBase, err := reader.GetPRBaseBranch(sctx.Ctx, pr)
 	if err != nil {
-		return "", fmt.Errorf("read the pull request's live base branch before restarting at Review: %w", err)
+		return "", fmt.Errorf("read the pull request's live base branch before restarting at Review: %w: %w", errLivePRBaseUnread, err)
 	}
 	liveBase = strings.TrimSpace(liveBase)
 	if liveBase == "" {
@@ -230,15 +242,15 @@ func resolveLivePRBase(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) (s
 }
 
 // applyRunPRBase sets the run's persisted per-run base to the base
-// resolveLivePRBase read, whenever that differs from the base configuration
-// already resolves to. Without it a restarted Review scopes the change against
-// a branch the pull request no longer targets, and a retargeted layer loses its
-// layer-only diff. The comparison is against the EFFECTIVE base, not the
-// per-run override alone: writing the override when the two already agree
-// materialises an operator-style choice nobody made, and every consumer that
-// reads "the operator picked a base" from a non-empty per-run value would then
-// act on it - reverting a maintainer's forge-side retarget, and failing a run
-// whose persisted pull request has since been closed.
+// resolveLivePRBase read, whenever that differs from the base the restart will
+// actually SCOPE by (scopingBaseBranch). That is the comparison the alignment
+// exists for: without it a restarted Review scopes the change against a branch
+// the pull request no longer targets, and a retargeted layer re-reviews every
+// layer beneath it. Comparing against the effective base instead missed exactly
+// that case, because a pushed pr.base_branch can equal the live base while the
+// scoping base is still the repository default. The write deliberately
+// supersedes an operator's earlier --base-branch: this is a restart-time
+// alignment to the pull request as it now is.
 func applyRunPRBase(sctx *pipeline.StepContext, liveBase string) error {
 	if liveBase == "" {
 		return nil
@@ -247,7 +259,7 @@ func applyRunPRBase(sctx *pipeline.StepContext, liveBase string) error {
 	if err != nil {
 		return fmt.Errorf("the pull request's live base branch is not a usable branch name: %w", err)
 	}
-	current := effectivePRBaseBranch(sctx)
+	current := scopingBaseBranch(sctx)
 	if current == liveBase {
 		return nil
 	}
