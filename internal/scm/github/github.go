@@ -144,7 +144,7 @@ func repoOwner(slug string) string {
 func (h *Host) Provider() scm.Provider { return scm.ProviderGitHub }
 
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, ReviewComments: true}
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, ReviewComments: true, MergedProof: true}
 }
 
 func (h *Host) Available(ctx context.Context) error {
@@ -433,6 +433,91 @@ func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) 
 		return "", fmt.Errorf("gh pr view base branch: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// GetMergedProof proves which exact head of this pull request was merged.
+// expectedHead is the run's recorded head and is always accepted; ownHeads
+// lists the run's other own heads (its durable last-pushed head and the
+// caller worktree's HEAD), which may carry the merge when the branch was
+// rewritten outside the run and then merged. A merge at any other head is a
+// foreign merge: it is refused with scm.ErrHeadChanged rather than reported
+// as the run's own outcome. Completeness (merge commit, timestamp, merger)
+// is required whenever the PR is merged, so an attestation written from this
+// proof always has all three fields.
+func (h *Host) GetMergedProof(ctx context.Context, pr *scm.PR, expectedHead string, ownHeads []string) (scm.MergedProof, error) {
+	selector, err := prSelector(pr)
+	if err != nil {
+		return scm.MergedProof{}, err
+	}
+	expectedHead = strings.TrimSpace(expectedHead)
+	if expectedHead == "" && len(ownHeads) == 0 {
+		return scm.MergedProof{}, errors.New("GitHub merged proof requires at least one accepted head SHA")
+	}
+	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
+	args = append(args, "--json", "number,url,state,headRefOid,mergeCommit,mergedAt,mergedBy")
+	out, err := h.cmd(ctx, "gh", args...).Output()
+	if err != nil {
+		return scm.MergedProof{}, fmt.Errorf("gh pr view merged proof: %w", err)
+	}
+	var response struct {
+		Number      int    `json:"number"`
+		URL         string `json:"url"`
+		State       string `json:"state"`
+		HeadRefOid  string `json:"headRefOid"`
+		MergeCommit struct {
+			Oid string `json:"oid"`
+		} `json:"mergeCommit"`
+		MergedAt string `json:"mergedAt"`
+		MergedBy struct {
+			Login string `json:"login"`
+		} `json:"mergedBy"`
+	}
+	if err := json.Unmarshal(out, &response); err != nil {
+		return scm.MergedProof{}, fmt.Errorf("decode gh pr view merged proof: %w", err)
+	}
+	proof := scm.MergedProof{
+		Number:         strconv.Itoa(response.Number),
+		URL:            response.URL,
+		HeadSHA:        response.HeadRefOid,
+		MergeCommitSHA: response.MergeCommit.Oid,
+		MergedBy:       response.MergedBy.Login,
+	}
+	if response.MergedAt != "" {
+		parsed, err := time.Parse(time.RFC3339, response.MergedAt)
+		if err != nil {
+			return scm.MergedProof{}, fmt.Errorf("invalid gh mergedAt timestamp: %w", err)
+		}
+		proof.MergedAt = parsed
+	}
+	if strings.EqualFold(strings.TrimSpace(response.State), "MERGED") {
+		proof.Merged = true
+	}
+	if proof.Merged && (proof.MergeCommitSHA == "" || proof.MergedAt.IsZero() || proof.MergedBy == "") {
+		return scm.MergedProof{}, errors.New("gh returned incomplete evidence for a merged PR")
+	}
+	if !headIsOwned(proof.HeadSHA, expectedHead, ownHeads) {
+		return scm.MergedProof{}, fmt.Errorf("%w: expected %s, got %s", scm.ErrHeadChanged, expectedHead, proof.HeadSHA)
+	}
+	return proof, nil
+}
+
+// headIsOwned reports whether observed is the run's primary expected head or
+// one of its other own heads. Comparison is case-insensitive: GitHub returns
+// lowercase object IDs while Git callers may pass either case.
+func headIsOwned(observed, expectedHead string, ownHeads []string) bool {
+	observed = strings.TrimSpace(observed)
+	if observed == "" {
+		return false
+	}
+	if expectedHead != "" && strings.EqualFold(observed, expectedHead) {
+		return true
+	}
+	for _, head := range ownHeads {
+		if head = strings.TrimSpace(head); head != "" && strings.EqualFold(observed, head) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {

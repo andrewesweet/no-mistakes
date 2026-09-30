@@ -504,3 +504,89 @@ func TestRecoverRewrittenRemoteRefusesWhenRunHeadChangesBeforeRebind(t *testing.
 		t.Fatalf("binding moved to %s generation %d while the run head changed", ptr(run.LastPushedSHA), value(run.PushGeneration))
 	}
 }
+
+// The rebind is the only writer of the unvalidated-bound-head marker, and the
+// recovery result itself must state that no run validated the head it just
+// bound. Every later report re-reads the marker and keeps saying so until a
+// run publishes the exact head.
+func TestRecoverRebindMarksTheBoundHeadUnvalidated(t *testing.T) {
+	t.Parallel()
+
+	f, rewritten := newRemoteRewrittenFixture(t)
+	recovered := f.service.Recover(f.ctx, false)
+	if !recovered.Recovered || recovered.Recovery == nil {
+		t.Fatalf("recover = %#v", recovered)
+	}
+	if recovered.BoundHeadUnvalidated != rewritten {
+		t.Fatalf("recovery result BoundHeadUnvalidated = %q, want %s", recovered.BoundHeadUnvalidated, rewritten)
+	}
+	bound, ok, err := f.db.GetUnvalidatedReboundHead(f.repo.ID, "refs/heads/feature/sync")
+	if err != nil || !ok || bound != rewritten {
+		t.Fatalf("marker = (%q, %v, %v), want %s", bound, ok, err, rewritten)
+	}
+
+	// An operator aligning the local worktree with the rebound head leaves
+	// the branch equal to a head no run validated: the report must stop
+	// calling that synchronized and point at a validation run instead.
+	mustRun(t, f.local, "fetch", f.remote, "feature/sync")
+	mustRun(t, f.local, "reset", "--hard", "FETCH_HEAD")
+	state := f.service.Refresh(f.ctx)
+	if state.State != StateSynchronized {
+		t.Fatalf("state = %q, want synchronized", state.State)
+	}
+	if state.BoundHeadUnvalidated != rewritten {
+		t.Fatalf("report BoundHeadUnvalidated = %q, want %s", state.BoundHeadUnvalidated, rewritten)
+	}
+	if state.NextAction == nil || state.NextAction.Code != "validate_rebound_head" ||
+		!strings.Contains(state.NextAction.Command, "no-mistakes axi run --intent") {
+		t.Fatalf("next action = %#v, want a validation run for the rebound head", state.NextAction)
+	}
+}
+
+// A publication of the exact rebound head by any run of the repository clears
+// the marker, so the reports go back to treating the branch as an ordinary
+// validated branch.
+func TestPublicationClearsTheUnvalidatedBoundHeadMarker(t *testing.T) {
+	t.Parallel()
+
+	f, rewritten := newRemoteRewrittenFixture(t)
+	recovered := f.service.Recover(f.ctx, false)
+	if !recovered.Recovered {
+		t.Fatalf("recover = %#v", recovered)
+	}
+	if err := f.db.ClearUnvalidatedReboundHeadOnPublication(f.run.ID, "refs/heads/feature/sync", rewritten); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := f.db.GetUnvalidatedReboundHead(f.repo.ID, "refs/heads/feature/sync"); err != nil || ok {
+		t.Fatalf("marker after publication = (found %v, err %v), want cleared", ok, err)
+	}
+	mustRun(t, f.local, "fetch", f.remote, "feature/sync")
+	mustRun(t, f.local, "reset", "--hard", "FETCH_HEAD")
+	state := f.service.Refresh(f.ctx)
+	if state.State != StateSynchronized || state.BoundHeadUnvalidated != "" {
+		t.Fatalf("post-publication state = %#v, want an ordinary synchronized branch", state)
+	}
+	if state.NextAction != nil {
+		t.Fatalf("post-publication next action = %#v, want none", state.NextAction)
+	}
+}
+
+// A marker naming a head other than the push binding's is stale reporting
+// state and annotates nothing: the marker must match the pushed head exactly.
+func TestStaleMarkerForADifferentHeadAnnotatesNothing(t *testing.T) {
+	t.Parallel()
+
+	f, rewritten := newRemoteRewrittenFixture(t)
+	if err := f.db.RecordUnvalidatedReboundHead(f.repo.ID, "refs/heads/feature/sync", rewritten); err != nil {
+		t.Fatal(err)
+	}
+	// The branch's binding still names f.pushed, not rewritten, so the marker
+	// (which names rewritten) says nothing about this relation.
+	state := f.service.Refresh(f.ctx)
+	if state.BoundHeadUnvalidated != "" {
+		t.Fatalf("state = %#v, want no annotation from a marker naming another head", state)
+	}
+	if state.NextAction == nil || state.NextAction.Code != "recover_remote_rewritten" {
+		t.Fatalf("next action = %#v, want the ordinary recovery offer", state.NextAction)
+	}
+}

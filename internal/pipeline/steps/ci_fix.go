@@ -125,6 +125,12 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 			// supersede findings that were left unselected for this repair.
 			// Carry them on the restart outcome: ask-user findings park before
 			// the restart, while an empty or informational set proceeds.
+			// Before any restart at Review, the run's persisted per-run base is
+			// aligned with the pull request's live forge base, so a retargeted
+			// layer keeps its layer-only scope (see alignRunBaseWithLivePRBase).
+			if err := alignRunBaseWithLivePRBase(sctx, host, pr); err != nil {
+				return nil, err
+			}
 			return &pipeline.StepOutcome{
 				RestartFrom: types.StepReview,
 				Findings:    sctx.DeferredFindings,
@@ -271,7 +277,7 @@ CI logs:
 	if errors.As(err, &refusal) {
 		head, recordErr := stepGitHeadSHA(sctx)
 		if recordErr == nil && head != sctx.Run.HeadSHA {
-			_, recordErr = s.recordLocalRepair(sctx, head)
+			_, recordErr = s.recordLocalRepair(sctx, head, "")
 		}
 		return repair, errors.Join(err, recordErr)
 	}
@@ -510,7 +516,7 @@ func (s *CIStep) ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, issueDesc s
 	case rebaseInProgress(sctx.Ctx, sctx.WorkDir) || mergeInProgress(sctx.Ctx, sctx.WorkDir):
 		leftover = append(leftover, fmt.Sprintf("The timed-out agent left an unfinished rebase or merge in the run worktree at %s; its partial HEAD is not recorded.", sctx.WorkDir))
 	case headErr == nil && head != "" && head != sctx.Run.HeadSHA:
-		if _, recErr := s.recordLocalRepair(sctx, head); recErr != nil {
+		if _, recErr := s.recordLocalRepair(sctx, head, ""); recErr != nil {
 			sctx.Log(fmt.Sprintf("warning: could not record timed-out CI repair head %s: %v", head, recErr))
 			leftover = append(leftover, fmt.Sprintf("The timed-out agent left a committed head at %s in the run worktree.", shortObjectID(head)))
 		} else {
@@ -681,11 +687,11 @@ func ciRepairPolicyDescription(sctx *pipeline.StepContext) string {
 // Review has approved it.
 func (s *CIStep) recordRepair(sctx *pipeline.StepContext, headSHA string) (ciRepairResult, error) {
 	if ciRevalidatesRepairs(sctx) {
-		return s.recordLocalRepair(sctx, headSHA)
+		return s.recordLocalRepair(sctx, headSHA, "")
 	}
 	if reason := ciRepairContinuityGap(sctx, headSHA); reason != "" {
 		sctx.Log(fmt.Sprintf("cannot prove the repaired head continues the reviewed head: %s; revalidating from Review instead of publishing", reason))
-		return s.recordLocalRepair(sctx, headSHA)
+		return s.recordLocalRepair(sctx, headSHA, "")
 	}
 	return s.publishRepair(sctx, headSHA)
 }
@@ -722,12 +728,13 @@ func ciRepairContinuityGap(sctx *pipeline.StepContext, headSHA string) string {
 // the Push step's
 // assertReviewApprovedPushHead guard refuses to publish the repaired head until
 // Review has approved it again. The CI monitor turns that into a restart at
-// Review.
-func (s *CIStep) recordLocalRepair(sctx *pipeline.StepContext, headSHA string) (ciRepairResult, error) {
+// Review. note is the log line to write; the empty note keeps the repair log
+// line, while the head-adoption path names its adopted head instead.
+func (s *CIStep) recordLocalRepair(sctx *pipeline.StepContext, headSHA, note string) (ciRepairResult, error) {
+	startingHead := sctx.Run.HeadSHA
 	if err := updateNonSharedBranchRef(sctx, headSHA); err != nil {
 		return ciRepairResult{}, err
 	}
-	startingHead := sctx.Run.HeadSHA
 	// Durable first, then in memory. Advancing the live head before the write
 	// succeeds leaves the monitor watching a head the durable record does not
 	// know about, still holding its old review approval, with the revalidation
@@ -738,7 +745,11 @@ func (s *CIStep) recordLocalRepair(sctx *pipeline.StepContext, headSHA string) (
 	sctx.Run.HeadSHA = headSHA
 	sctx.Run.ReviewApprovedHeadSHA = nil
 	pipeline.PersistUncertifiedPipelineRange(sctx, startingHead, headSHA)
-	sctx.Log("committed CI repair for revalidation")
+	if note != "" {
+		sctx.Log(note)
+	} else {
+		sctx.Log("committed CI repair for revalidation")
+	}
 	return ciRepairResult{HeadAdvanced: true, Revalidate: true}, nil
 }
 

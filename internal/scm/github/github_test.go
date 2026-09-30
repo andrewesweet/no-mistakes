@@ -1997,3 +1997,101 @@ func TestGetPRContentRequiresExplicitStrings(t *testing.T) {
 		t.Fatalf("explicit empty body rejected: %+v, %v", got, err)
 	}
 }
+
+// A merged PR whose head is the run's recorded head proves the run's own
+// outcome: the proof carries every attestation field.
+func TestGetMergedProofAcceptsMergesAtTheExpectedHead(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 42 --repo test/repo --json number,url,state,headRefOid,mergeCommit,mergedAt,mergedBy": {
+			stdout: `{"number":42,"url":"https://github.com/test/repo/pull/42","state":"MERGED","headRefOid":"1111111111111111111111111111111111111111","mergeCommit":{"oid":"abc"},"mergedAt":"2026-09-01T12:00:00Z","mergedBy":{"login":"reviewer"}}` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	proof, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, "1111111111111111111111111111111111111111", nil)
+	if err != nil {
+		t.Fatalf("GetMergedProof() error = %v", err)
+	}
+	if !proof.Merged || proof.HeadSHA != "1111111111111111111111111111111111111111" ||
+		proof.MergeCommitSHA != "abc" || proof.MergedBy != "reviewer" || proof.MergedAt.IsZero() || proof.Number != "42" {
+		t.Fatalf("proof = %#v", proof)
+	}
+}
+
+// A branch rewritten outside the run and then merged carries the merge at a
+// head the recorded head alone cannot explain; the run's other own heads do.
+func TestGetMergedProofAcceptsMergesAtAnotherOwnHead(t *testing.T) {
+	t.Parallel()
+
+	const adopted = "2222222222222222222222222222222222222222"
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 42 --repo test/repo --json number,url,state,headRefOid,mergeCommit,mergedAt,mergedBy": {
+			stdout: `{"number":42,"url":"https://github.com/test/repo/pull/42","state":"MERGED","headRefOid":"` + adopted + `","mergeCommit":{"oid":"abc"},"mergedAt":"2026-09-01T12:00:00Z","mergedBy":{"login":"reviewer"}}` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	proof, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, "1111111111111111111111111111111111111111", []string{adopted})
+	if err != nil {
+		t.Fatalf("GetMergedProof() error = %v", err)
+	}
+	if !proof.Merged || proof.HeadSHA != adopted {
+		t.Fatalf("proof = %#v", proof)
+	}
+}
+
+// A merge at a head the run owns nowhere is a foreign merge: the run must
+// refuse to report it as its own outcome rather than attesting a head it
+// never validated.
+func TestGetMergedProofRefusesAMergeAtAHeadTheRunOwnsNowhere(t *testing.T) {
+	t.Parallel()
+
+	const foreign = "3333333333333333333333333333333333333333"
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 42 --repo test/repo --json number,url,state,headRefOid,mergeCommit,mergedAt,mergedBy": {
+			stdout: `{"number":42,"url":"https://github.com/test/repo/pull/42","state":"MERGED","headRefOid":"` + foreign + `","mergeCommit":{"oid":"abc"},"mergedAt":"2026-09-01T12:00:00Z","mergedBy":{"login":"someone-else"}}` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	_, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, "1111111111111111111111111111111111111111", []string{"2222222222222222222222222222222222222222"})
+	if !errors.Is(err, scm.ErrHeadChanged) {
+		t.Fatalf("GetMergedProof() error = %v, want ErrHeadChanged", err)
+	}
+	if !strings.Contains(err.Error(), "expected 1111111111111111111111111111111111111111") ||
+		!strings.Contains(err.Error(), "got "+foreign) {
+		t.Fatalf("error = %v, want both the expected and the observed head named", err)
+	}
+}
+
+// Completeness is required whenever the PR is merged, so an attestation
+// written from this proof always has all three fields.
+func TestGetMergedProofRefusesIncompleteEvidenceForAMergedPR(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 42 --repo test/repo --json number,url,state,headRefOid,mergeCommit,mergedAt,mergedBy": {
+			stdout: `{"number":42,"url":"https://github.com/test/repo/pull/42","state":"MERGED","headRefOid":"1111111111111111111111111111111111111111","mergeCommit":{"oid":"abc"},"mergedAt":"2026-09-01T12:00:00Z","mergedBy":{"login":""}}` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	_, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, "1111111111111111111111111111111111111111", nil)
+	if err == nil || !strings.Contains(err.Error(), "incomplete evidence") {
+		t.Fatalf("GetMergedProof() error = %v, want incomplete-evidence refusal", err)
+	}
+}
+
+// Membership is case-insensitive: providers shorten or lengthen SHAs in
+// their payloads, and a head this run owns must never be refused on case.
+func TestGetMergedProofHeadMembershipIsCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 42 --repo test/repo --json number,url,state,headRefOid,mergeCommit,mergedAt,mergedBy": {
+			stdout: `{"number":42,"url":"https://github.com/test/repo/pull/42","state":"MERGED","headRefOid":"AAAA111111111111111111111111111111111111","mergeCommit":{"oid":"abc"},"mergedAt":"2026-09-01T12:00:00Z","mergedBy":{"login":"reviewer"}}` + "\n",
+		},
+	}), nil, "", "test/repo")
+
+	if _, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, "aaaa111111111111111111111111111111111111", nil); err != nil {
+		t.Fatalf("GetMergedProof() error = %v, want case-insensitive ownership", err)
+	}
+}

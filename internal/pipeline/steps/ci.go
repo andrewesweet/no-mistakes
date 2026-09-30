@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -140,7 +141,7 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 	}
 	switch state {
 	case scm.PRStateMerged:
-		if err := verifyMergedProof(sctx.Ctx, host, &scm.PR{Number: prNumber, URL: prURL}, sctx.Run.HeadSHA); err != nil {
+		if err := verifyMergedProof(sctx.Ctx, host, &scm.PR{Number: prNumber, URL: prURL}, s.ownValidatedHeads(sctx)); err != nil {
 			return false, err
 		}
 		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
@@ -220,7 +221,7 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 	return fmt.Sprintf("live checks for %s not all passed: %s", prURL, strings.Join(unresolvedCheckNames(checks), ", ")), nil
 }
 
-func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, expectedHead string) error {
+func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, ownHeads []string) error {
 	if !host.Capabilities().MergedProof {
 		return nil
 	}
@@ -228,7 +229,11 @@ func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, expectedH
 	if !ok {
 		return fmt.Errorf("SCM provider advertises merged proof but does not implement it")
 	}
-	proof, err := proofHost.GetMergedProof(ctx, pr, expectedHead)
+	var expectedHead string
+	if len(ownHeads) > 0 {
+		expectedHead = ownHeads[0]
+	}
+	proof, err := proofHost.GetMergedProof(ctx, pr, expectedHead, ownHeads)
 	if err != nil {
 		return fmt.Errorf("verify merged PR proof: %w", err)
 	}
@@ -238,7 +243,12 @@ func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, expectedH
 	if proof.Number != pr.Number || proof.URL != pr.URL {
 		return fmt.Errorf("verify merged PR proof: proof identifies PR %s at %q, want PR %s at %q", proof.Number, proof.URL, pr.Number, pr.URL)
 	}
-	if expectedHead != "" && proof.HeadSHA != expectedHead {
+	// Membership is re-checked here against the same heads the host validated,
+	// so a host that validates only its primary head can never hand back a
+	// proof the run owns nowhere.
+	if len(ownHeads) > 0 && !slices.ContainsFunc(ownHeads, func(head string) bool {
+		return strings.EqualFold(strings.TrimSpace(head), proof.HeadSHA)
+	}) {
 		return fmt.Errorf("verify merged PR proof: %w: expected %s, got %s", scm.ErrHeadChanged, expectedHead, proof.HeadSHA)
 	}
 	return nil
@@ -343,6 +353,12 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 		retryRefusal = false
 		if repair.Revalidate {
+			// Before this restart at Review, align the run's persisted base
+			// with the pull request's live forge base (same rule as every
+			// other CI restart at Review).
+			if err := alignRunBaseWithLivePRBase(sctx, host, pr); err != nil {
+				return nil, err
+			}
 			return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
 		}
 	}
@@ -487,7 +503,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			sctx.Log(fmt.Sprintf("warning: could not check PR state: %v", err))
 			prStateKnown = false
 		} else if state == scm.PRStateMerged {
-			if err := verifyMergedProof(ctx, host, pr, sctx.Run.HeadSHA); err != nil {
+			if err := verifyMergedProof(ctx, host, pr, s.ownValidatedHeads(sctx)); err != nil {
 				return nil, err
 			}
 			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
@@ -505,6 +521,17 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		} else if state == scm.PRStateOpen {
 			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "open"); err != nil {
 				return nil, err
+			}
+			// Before any check result can establish readiness, look at the
+			// branch head the push target actually serves. A rewritten head
+			// this run owns nowhere is adopted and revalidated; an unreadable
+			// target keeps today's behavior for this poll: a warning, no
+			// trigger, and the next poll reads it again.
+			liveHead, headErr := publishedBranchHead(sctx)
+			if headErr != nil {
+				sctx.Log(fmt.Sprintf("warning: could not read the published branch head: %v", headErr))
+			} else if !s.ciRunOwnsHead(sctx, liveHead) {
+				return s.adoptPublishedHeadRewrite(sctx, host, pr, liveHead)
 			}
 		}
 
@@ -548,6 +575,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		} else {
 			consecutiveCheckErrs = 0
+			// GitHub resolves the checks against the pull request's live head,
+			// so a rewrite that lands between the state read and this read
+			// surfaces here as green or failing checks for a commit this run
+			// never validated. The same adoption applies before any of those
+			// results can establish readiness.
+			if observed := strings.TrimSpace(pr.HeadSHA); observed != "" && !s.ciRunOwnsHead(sctx, observed) {
+				return s.adoptPublishedHeadRewrite(sctx, host, pr, observed)
+			}
 			// A failure the provider produced before the repository's own steps
 			// ran (a setup/action-resolution outage) is infrastructure, not a
 			// verdict on the code. Re-bucket those into the transient path before

@@ -826,6 +826,19 @@ func (d *DB) UpdateRunHeadSHAForRevalidation(id, headSHA string) error {
 	return nil
 }
 
+// UpdateRunPRBaseBranch persists a per-run base branch override after run
+// creation. Only the CI step's restart-at-Review path writes it today: an
+// open pull request's live forge base outranks configuration, and a restart
+// that keeps a stale base would scope the revalidated change against a branch
+// the pull request no longer targets.
+func (d *DB) UpdateRunPRBaseBranch(id, baseBranch string) error {
+	_, err := d.sql.Exec(`UPDATE runs SET pr_base_branch = ?, updated_at = ? WHERE id = ?`, baseBranch, now(), id)
+	if err != nil {
+		return fmt.Errorf("update run pr base branch: %w", err)
+	}
+	return nil
+}
+
 // UpdateRunError sets the error message on a run.
 func (d *DB) UpdateRunError(id, errMsg string) error {
 	return d.UpdateRunErrorStatus(id, errMsg, types.RunFailed)

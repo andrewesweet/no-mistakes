@@ -78,10 +78,15 @@ type State struct {
 	// returned (by this call or an earlier, idempotent one), or the terminal
 	// outcome had already released the branch (user_owned), making recovery an
 	// idempotent no-op.
-	Recovered  bool
-	Recovery   *RecoveryEvidence
-	NextAction *NextAction
-	Error      string
+	Recovered bool
+	Recovery  *RecoveryEvidence
+	// BoundHeadUnvalidated is the push-bound head a rewritten-remote recovery
+	// rebound without any run validating it. Empty when every reported bound
+	// head was validated by the run that published it; the report holds until
+	// any run publishes that exact head, which clears the durable marker.
+	BoundHeadUnvalidated string
+	NextAction           *NextAction
+	Error                string
 }
 
 type LocalState struct {
@@ -1400,6 +1405,17 @@ func (s *Service) recoverRemoteRewritten(ctx context.Context, run *db.Run, keepL
 		Source: "remote_rewritten", RepositoryID: s.Repo.ID, RunID: run.ID, Branch: fresh.Local.Branch,
 		RequiredHead: live, PreservedHead: superseded, ArchiveRef: anchorRef, Proof: anchoredIn,
 	}
+	// The rebind is the only writer of the unvalidated-bound-head marker, and
+	// the recovery result must state that no run validated the head it just
+	// bound. Failing to record it refuses the recovery (fail closed) rather
+	// than reporting a head as usable while the reports would stay silent
+	// about its provenance.
+	if err := s.DB.RecordUnvalidatedReboundHead(s.Repo.ID, fresh.Target.Ref, live); err != nil {
+		return blockedPlan(state, state.State, "blocked_recover_marker_failed", fmt.Sprintf("the push binding was rebound to %s, but recording that no run validated it failed, so recovery is not reported; the superseded pipeline head stays anchored at %s", live, anchorRef)), true
+	}
+	// The inspection above ran before the marker existed, so the recovery
+	// result carries the statement directly; every later report re-reads it.
+	state.BoundHeadUnvalidated = live
 	note := fmt.Sprintf("the superseded pipeline head was anchored at %s; the branch, worktree, and remote were not changed", anchorRef)
 	if state.Error != "" {
 		note += "; " + strings.TrimSuffix(state.Error, "; no files or refs were changed")
@@ -1853,11 +1869,19 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 }
 
 func (s *Service) classifyRelation(ctx context.Context, state *State, pushed, base string, live bool) {
+	s.annotateUnvalidatedRebound(state, pushed)
 	if state.Local.Head == pushed {
 		state.State = StateSynchronized
 		state.Relation = RelationEqual
 		state.Safety = "already_synchronized"
 		state.NextAction = nil
+		if state.BoundHeadUnvalidated != "" {
+			// The branch equals a head no run validated: the next action is to
+			// start a validation run on it, not to call it synchronized. An
+			// up-to-date push from that run falls back to a rerun that keeps
+			// the pull request, so the instruction is safe to follow.
+			state.NextAction = &NextAction{Code: "validate_rebound_head", Command: `no-mistakes axi run --intent "<what the user set out to accomplish>"`}
+		}
 		return
 	}
 	if objectExists(ctx, s.workDir(), pushed) {
@@ -1912,6 +1936,24 @@ func (s *Service) classifyRelation(ctx context.Context, state *State, pushed, ba
 
 func syncAnchorRef(runID string) string {
 	return "refs/no-mistakes/sync-anchor/" + runID
+}
+
+// annotateUnvalidatedRebound reports a push binding whose head a
+// rewritten-remote recovery rebound without any run validating it. The
+// recovery's compare-and-swap is the only writer of the durable marker, and a
+// later publication of the exact head by any run clears it, so a stale marker
+// can never name a head the pipeline has since validated. States that never
+// reach the ordinary relation classification (merged, closed, ambiguous
+// context) keep their own reasons and carry no statement either way.
+func (s *Service) annotateUnvalidatedRebound(state *State, pushed string) {
+	if state == nil || pushed == "" || state.Target.Ref == "" {
+		return
+	}
+	bound, ok, err := s.DB.GetUnvalidatedReboundHead(s.Repo.ID, state.Target.Ref)
+	if err != nil || !ok || bound != pushed {
+		return
+	}
+	state.BoundHeadUnvalidated = bound
 }
 
 func equivalentDivergence(ctx context.Context, dir, local, pushed, base string) bool {

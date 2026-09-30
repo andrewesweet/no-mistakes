@@ -447,6 +447,50 @@ func extractTrailingNumber(rawURL string) int {
 	return number
 }
 
+// fakeGHPRBaseBranch answers `gh pr view <n> --json baseRefName`, which the
+// CI step's restart-at-Review base alignment reads. FAKE_CLI_PR_BASE overrides
+// the default main.
+func fakeGHPRBaseBranch(joined string) {
+	if !strings.Contains(joined, "pr view") || !strings.Contains(joined, "--json baseRefName") {
+		return
+	}
+	base := os.Getenv("FAKE_CLI_PR_BASE")
+	if base == "" {
+		base = "main"
+	}
+	fmt.Println(base)
+	os.Exit(0)
+}
+
+// fakeGHMergedProof answers the merged-proof read
+// (`gh pr view <n> --json number,url,state,headRefOid,mergeCommit,mergedAt,mergedBy`).
+// FAKE_CLI_PR_MERGED_PROOF_JSON overrides the whole payload; the default
+// synthesizes a complete MERGED proof at the fake's configured head, so a
+// monitor that trusts it validates the head the tests set up. It must be
+// checked before the plain `--json state` and `--json headRefOid` branches:
+// this argv contains both substrings.
+func fakeGHMergedProof(args []string, joined string) {
+	if !strings.Contains(joined, "pr view") || !strings.Contains(joined, "mergeCommit") {
+		return
+	}
+	if raw := os.Getenv("FAKE_CLI_PR_MERGED_PROOF_JSON"); raw != "" {
+		fmt.Println(raw)
+		os.Exit(0)
+	}
+	head := fakePRHeadSHA()
+	number := 42
+	for i, arg := range args {
+		if arg == "view" && i+1 < len(args) {
+			if parsed := extractTrailingNumber(args[i+1]); parsed != 0 {
+				number = parsed
+			}
+		}
+	}
+	payload := fmt.Sprintf(`{"number":%d,"url":"https://github.com/test/repo/pull/%d","state":"MERGED","headRefOid":%q,"mergeCommit":{"oid":%q},"mergedAt":"2026-01-01T00:00:00Z","mergedBy":{"login":"someone"}}`, number, number, head, head)
+	fmt.Println(payload)
+	os.Exit(0)
+}
+
 func fakeCIGHReconcileHandler(args []string) {
 	joined := strings.Join(args, " ")
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
@@ -460,6 +504,7 @@ func fakeCIGHReconcileHandler(args []string) {
 		fmt.Println("https://github.com/test/repo/pull/42")
 		os.Exit(0)
 	}
+	fakeGHMergedProof(args, joined)
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json state") {
 		state, err := os.ReadFile(os.Getenv("FAKE_CLI_STATE_PATH"))
 		if err != nil {
@@ -565,6 +610,8 @@ func fakeCIGHHandler(args []string) {
 		os.Exit(0)
 	}
 	fakeGHHandlePRContentCommands(args, joined)
+	fakeGHMergedProof(args, joined)
+	fakeGHPRBaseBranch(joined)
 	if strings.Contains(joined, "pr list") {
 		if prListJSON := os.Getenv("FAKE_CLI_PR_LIST_JSON"); prListJSON != "" {
 			fmt.Print(prListJSON)
@@ -656,6 +703,8 @@ func fakeCIGHSequenceHandler(args []string) {
 		os.Exit(0)
 	}
 	fakeGHHandlePRContentCommands(args, joined)
+	fakeGHMergedProof(args, joined)
+	fakeGHPRBaseBranch(joined)
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json mergeable") {
 		if mergeableErr != "" {
 			fmt.Fprintln(os.Stderr, mergeableErr)
@@ -869,6 +918,7 @@ func fakeCIGHNoChecksHandler(args []string) {
 		os.Exit(0)
 	}
 	fakeGHHandlePRContentCommands(args, joined)
+	fakeGHMergedProof(args, joined)
 	if strings.Contains(joined, "pr checks") {
 		fmt.Fprintln(os.Stderr, "no checks reported on the 'feature/e2e' branch")
 		os.Exit(1)

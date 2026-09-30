@@ -101,6 +101,14 @@ const (
 	FindingCategoryCIMergeConflict = "ci-merge-conflict"
 	FindingCategoryCITransient     = "ci-transient"
 	FindingCategoryCIReviewBot     = "ci-review-bot"
+	// FindingCategoryCIHeadRewrite marks the ask-user finding the CI monitor
+	// parks on when the pull request branch moved to a head the run owns
+	// nowhere (not recorded, not durably pushed, not the caller worktree) and
+	// the run worktree holds commits that are neither on the live head nor
+	// recorded as published. No head is adopted until an operator decides;
+	// the finding names the recorded, worktree, and live heads so the decision
+	// is informed.
+	FindingCategoryCIHeadRewrite = "ci-head-rewrite"
 )
 
 // FindingCategoryReviewQuestion marks the synthetic finding the review step
