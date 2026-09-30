@@ -163,23 +163,3 @@ func TestCaptureSkipsARoundWhoseTrustedConfigCommitIsGone(t *testing.T) {
 		t.Fatalf("capture error = %v, want ErrNoCapturableReview so auto-capture reports a skip", err)
 	}
 }
-
-// A trusted default-branch config the parser rejects leaves the pipeline with
-// no trusted pr.base_branch, so the review scoped against the repository
-// default and the round is faithfully replayable. Capture must keep it rather
-// than blame a commit that is present and readable.
-func TestCaptureKeepsARoundWhoseTrustedConfigIsMalformed(t *testing.T) {
-	ctx := context.Background()
-	p, sourceDB, sourceRun, repo, _ := setupCapturedRun(t, ctx)
-	defer sourceDB.Close()
-
-	trustedSHA := commitTrustedRepoConfig(t, ctx, repo, "pr:\n  base_branch: [unclosed\n")
-
-	cases, err := captureSecondRun(t, ctx, p, sourceDB, repo, "feature/broken-trust", sourceRun.HeadSHA, sourceRun.BaseSHA, "", trustedSHA, "ignore_patterns: ['vendor']\n")
-	if err != nil {
-		t.Fatalf("capture: %v", err)
-	}
-	if len(cases) != 1 {
-		t.Fatalf("captured cases = %d, want 1", len(cases))
-	}
-}

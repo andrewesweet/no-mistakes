@@ -331,16 +331,7 @@ func repoConfigAt(ctx context.Context, gateDir, sha string) (*config.RepoConfig,
 	if err != nil {
 		return nil, fmt.Errorf("read repository config: %w", err)
 	}
-	cfg, err := config.LoadRepoFromBytes([]byte(content))
-	if err != nil {
-		// A trusted config the parser rejects is no trusted config at all to
-		// the pipeline (loadTrustedRepoConfig warns and returns nil), so the
-		// run scoped against the repository default branch and stays
-		// capturable. Only an unreadable commit makes the scoping base
-		// unknowable.
-		return nil, nil
-	}
-	return cfg, nil
+	return config.LoadRepoFromBytes([]byte(content))
 }
 
 func agentNeutralGlobalConfig(data []byte) ([]byte, error) {
