@@ -400,3 +400,72 @@ func TestCIStep_AdoptionRefusesAnUnusableLiveBaseName(t *testing.T) {
 		t.Fatalf("durable run head = %s, want the validated %s", run.HeadSHA, headSHA)
 	}
 }
+
+// A finding a human left unselected at an earlier CI gate is the operator's
+// outstanding decision, and every other terminal CI park and restart carries it
+// forward. The head-rewrite park and the adoption restart must too: dropping it
+// loses the decision with no record, since nothing on these paths clears it.
+func TestCIStep_HeadRewriteOutcomesCarryTheDeferredFindings(t *testing.T) {
+	t.Parallel()
+
+	const deferred = `{"findings":[{"id":"ci-2","severity":"warning","description":"CI check failing: lint - left for a human","action":"ask-user","category":"ci-check","check":"lint"}],"summary":"1 unselected CI finding"}`
+
+	t.Run("park", func(t *testing.T) {
+		t.Parallel()
+		dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+		pushOrphanRewrite(t, dir)
+
+		env := revalidateEnv(t, `[{"name":"test","state":"SUCCESS","bucket":"pass"}]`, "")
+		_, sctx, _ := revalidateContext(t, dir, upstream, baseSHA, headSHA, env)
+		sctx.DeferredFindings = deferred
+
+		outcome, err := (&steps.CIStep{}).Execute(sctx)
+		if err != nil {
+			t.Fatalf("park returned error: %v", err)
+		}
+		if outcome == nil || !outcome.NeedsApproval {
+			t.Fatalf("outcome = %#v, want an ask-user park", outcome)
+		}
+		var findings types.Findings
+		if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+			t.Fatalf("decode findings: %v", err)
+		}
+		var sawRewrite, sawDeferred bool
+		for _, item := range findings.Items {
+			if item.Category == types.FindingCategoryCIHeadRewrite {
+				sawRewrite = true
+			}
+			if item.ID == "ci-2" {
+				sawDeferred = true
+			}
+		}
+		if !sawRewrite || !sawDeferred {
+			t.Fatalf("findings = %+v, want both the head-rewrite park and the operator's unselected finding", findings.Items)
+		}
+	})
+
+	t.Run("adoption restart", func(t *testing.T) {
+		t.Parallel()
+		dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+		pushDescendantRewrite(t, dir)
+
+		env := revalidateEnv(t, `[{"name":"test","state":"SUCCESS","bucket":"pass"}]`, "develop")
+		_, sctx, _ := revalidateContext(t, dir, upstream, baseSHA, headSHA, env)
+		sctx.DeferredFindings = deferred
+
+		outcome, err := (&steps.CIStep{}).Execute(sctx)
+		if err != nil {
+			t.Fatalf("adoption returned error: %v", err)
+		}
+		if outcome == nil || outcome.RestartFrom != types.StepReview {
+			t.Fatalf("outcome = %#v, want a restart from Review", outcome)
+		}
+		var findings types.Findings
+		if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+			t.Fatalf("decode findings: %v", err)
+		}
+		if len(findings.Items) != 1 || findings.Items[0].ID != "ci-2" {
+			t.Fatalf("findings = %+v, want the operator's unselected finding carried on the restart", findings.Items)
+		}
+	})
+}

@@ -95,7 +95,9 @@ func adoptableHeadRefusal(sctx *pipeline.StepContext, liveHead string) string {
 
 // parkPublishedHeadRewrite parks the run as ask-user: no head is adopted, the
 // recorded head, the worktree head, and the live head are all named in the
-// finding, and the decision is the operator's.
+// finding, and the decision is the operator's. Callers route it through
+// ciTerminalRepairOutcome, so findings a human left unselected at an earlier CI
+// gate reach this gate too rather than vanishing with their decision.
 func parkPublishedHeadRewrite(recorded, worktreeHead, liveHead, reason string) *pipeline.StepOutcome {
 	findings := Findings{
 		Summary: "The pull request branch moved to a head this run owns nowhere; decide before anything is adopted",
@@ -146,7 +148,8 @@ func (s *CIStep) adoptPublishedHeadRewrite(sctx *pipeline.StepContext, host scm.
 	}
 	if reason := adoptableHeadRefusal(sctx, target); reason != "" {
 		sctx.Log(fmt.Sprintf("not adopting %s: %s", shortSHA(target), reason))
-		return parkPublishedHeadRewrite(recorded, worktreeHead, target, reason), nil
+		park := parkPublishedHeadRewrite(recorded, worktreeHead, target, reason)
+		return ciTerminalRepairOutcome(park, Findings{}, sctx.DeferredFindings), nil
 	}
 	liveBase, err := resolveLivePRBase(sctx, host, pr)
 	if err != nil {
@@ -161,7 +164,10 @@ func (s *CIStep) adoptPublishedHeadRewrite(sctx *pipeline.StepContext, host scm.
 	if err := applyRunPRBase(sctx, liveBase); err != nil {
 		return nil, err
 	}
-	return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
+	return &pipeline.StepOutcome{
+		RestartFrom: types.StepReview,
+		Findings:    sctx.DeferredFindings,
+	}, nil
 }
 
 // fetchVerifiedPublishedHead fetches the pull request branch from the push
