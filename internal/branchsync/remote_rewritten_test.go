@@ -747,8 +747,11 @@ func TestApplyOntoAReboundHeadReportsAnUnknownValidationState(t *testing.T) {
 	if !state.BoundHeadValidationUnknown || state.Safety != SafetyValidationUnknown {
 		t.Fatalf("state = %#v, want the unknown validation state recorded instead of a plain synchronized", state)
 	}
-	if state.Error == "" {
-		t.Fatalf("state = %#v, want the report to say why the validation state is unknown", state)
+	// An unknown-validation report is never a refusal, so it carries no Error:
+	// runAxiSync would print that next to result=applied as a top-level error
+	// for a synchronization that succeeded.
+	if state.Error != "" {
+		t.Fatalf("state = %#v, want no error on a completed synchronization", state)
 	}
 	if state.NextAction == nil || state.NextAction.Code != "validate_rebound_head" {
 		t.Fatalf("next action = %#v, want the validation run offered", state.NextAction)
@@ -783,5 +786,41 @@ func TestRecoverReportsAnUnknownValidationStateRatherThanLosingTheRebind(t *test
 	}
 	if recovered.NextAction == nil || recovered.NextAction.Code != "validate_rebound_head" {
 		t.Fatalf("next action = %#v, want the validation run offered", recovered.NextAction)
+	}
+}
+
+// Every path that re-inspects AFTER its mutation lands routes through the same
+// downgrade, because the classification it wraps cannot know the mutation
+// happened and reports the unreadable marker as a refusal. Refusing work that
+// is already done sends the operator to recover a branch that is synchronized.
+func TestDowngradeUnreadableReboundMarkerReportsTheCompletedMutation(t *testing.T) {
+	t.Parallel()
+
+	blocked := State{State: StatePipelineOwned, Relation: RelationBehind}
+	blockUnreadableReboundMarker(&blocked, "whether any run validated the push-bound head could not be read")
+	if blocked.NextAction == nil || blocked.NextAction.Code != "retry" || blocked.Error == "" {
+		t.Fatalf("pre-mutation refusal = %#v, want the retry offered with its reason", blocked)
+	}
+
+	downgradeUnreadableReboundMarker(&blocked)
+	if blocked.State != StateSynchronized || blocked.Relation != RelationEqual {
+		t.Fatalf("state = %#v, want the completed mutation reported as synchronized", blocked)
+	}
+	if !blocked.BoundHeadValidationUnknown || blocked.Safety != SafetyValidationUnknown {
+		t.Fatalf("state = %#v, want the unknown validation state instead of a plain synchronized", blocked)
+	}
+	if blocked.Error != "" {
+		t.Fatalf("state = %#v, want no error: a completed mutation is never a refusal", blocked)
+	}
+	if blocked.NextAction == nil || blocked.NextAction.Code != "validate_rebound_head" {
+		t.Fatalf("next action = %#v, want the validation run offered", blocked.NextAction)
+	}
+
+	// Anything else keeps its own verdict: the downgrade is keyed on the one
+	// safety the marker read produces.
+	ordinary := State{State: StateBehind, Relation: RelationBehind, Safety: SafetySafeFastForward}
+	downgradeUnreadableReboundMarker(&ordinary)
+	if ordinary.State != StateBehind || ordinary.Safety != SafetySafeFastForward || ordinary.BoundHeadValidationUnknown {
+		t.Fatalf("state = %#v, want an ordinary plan untouched", ordinary)
 	}
 }

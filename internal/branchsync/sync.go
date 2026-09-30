@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"log/slog"
+
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -535,10 +537,10 @@ func (s *Service) Apply(ctx context.Context) State {
 	plan.Relation = RelationEqual
 	plan.Safety = "already_synchronized"
 	plan.Error = ""
+	plan.NextAction = reboundNextAction(&plan)
 	if !s.annotateUnvalidatedRebound(&plan, plan.Pipeline.PushedHead) {
 		markReboundValidationUnknown(&plan, "HEAD reached the exact pipeline-pushed commit, but whether any run validated that head could not be read")
 	}
-	plan.NextAction = reboundNextAction(&plan)
 	return plan
 }
 
@@ -579,8 +581,7 @@ func (s *Service) BindRecoveryArchive(ctx context.Context, archiveRef string) St
 	}
 	if len(records) > 0 {
 		if len(records) == 1 && sameRecoveryArchive(records[0], record) {
-			verified, _, _ := s.inspect(ctx)
-			return verified
+			return s.inspectAfterMutation(ctx)
 		}
 		return blockedPlan(state, StatePipelineOwned, "blocked_recover_archive_ambiguous", fmt.Sprintf("run %s already has %d recovery archive record(s); refusing to add another candidate; no files or refs were changed", run.ID, len(records)))
 	}
@@ -594,8 +595,7 @@ func (s *Service) BindRecoveryArchive(ctx context.Context, archiveRef string) St
 	if _, err := s.DB.RecordRecoveryArchive(*record); err != nil {
 		return blockedPlan(state, StatePipelineOwned, "blocked_recover_archive_record_failed", fmt.Sprintf("the verified archive ref %s could not be recorded: %v; no files or refs were changed", record.ArchiveRef, err))
 	}
-	verified, _, _ := s.inspect(ctx)
-	return verified
+	return s.inspectAfterMutation(ctx)
 }
 
 // Recover returns custody of a branch stranded by a TERMINAL run whose MOVED
@@ -1413,11 +1413,7 @@ func (s *Service) recoverRemoteRewritten(ctx context.Context, run *db.Run, keepL
 		state.Pipeline.RunID != run.ID || !reboundStateUsable(state) {
 		return blockedPlan(state, state.State, "blocked_recover_ownership_changed", fmt.Sprintf("the push binding was rebound to %s, but this run no longer owns the branch or its binding could not be confirmed; the superseded pipeline head stays anchored at %s", live, anchorRef)), true
 	}
-	if state.Safety == "blocked_rebound_marker_unreadable" {
-		state.State = StateSynchronized
-		state.Relation = RelationEqual
-		markReboundValidationUnknown(&state, "the push binding was rebound, but whether any run validated that head could not be read")
-	}
+	downgradeUnreadableReboundMarker(&state)
 	state.Recovered = true
 	state.Changed = false
 	state.Recovery = &RecoveryEvidence{
@@ -1531,7 +1527,7 @@ func (s *Service) finishRecover(ctx context.Context, run *db.Run, changed bool) 
 		state.NextAction = nil
 		return state
 	}
-	state, _, _ := s.inspect(ctx)
+	state := s.inspectAfterMutation(ctx)
 	state.Recovered = true
 	state.Changed = changed
 	return state
@@ -1576,7 +1572,7 @@ func (s *Service) finishKeepLocalRecover(ctx context.Context, state State, runID
 		fresh.NextAction = nil
 		return fresh
 	}
-	fresh, _, _ := s.inspect(ctx)
+	fresh := s.inspectAfterMutation(ctx)
 	fresh.Recovered = true
 	fresh.Changed = false
 	return fresh
@@ -1670,7 +1666,7 @@ func (s *Service) AdoptPublished(ctx context.Context) State {
 		return blockedPlan(state, StateCustodyReturned, "blocked_adopt_published_gate_race", "the gate lane changed while the published head was being adopted; the lane was not replaced and the recovered head remains preserved")
 	}
 
-	adopted, _, _ := s.inspect(ctx)
+	adopted := s.inspectAfterMutation(ctx)
 	adopted.Changed = true
 	return adopted
 }
@@ -2017,9 +2013,35 @@ func markReboundValidationUnknown(state *State, reason string) {
 	if state == nil {
 		return
 	}
+	slog.Warn("unvalidated-rebound-head marker unreadable after a completed mutation", "reason", reason, "repository", state.Target.Ref)
 	state.BoundHeadValidationUnknown = true
 	state.Safety = SafetyValidationUnknown
-	state.Error = reason
+	state.Error = ""
+	state.NextAction = reboundNextAction(state)
+}
+
+// inspectAfterMutation is the re-inspection every path runs once its mutation
+// has landed. The classification it wraps cannot know a mutation already
+// happened, so an unreadable marker arrives as a refusal; here that refusal is
+// downgraded to the unknown-validation report, because refusing work that has
+// already been done tells the operator to recover a branch that is in fact
+// synchronized.
+func (s *Service) inspectAfterMutation(ctx context.Context) State {
+	state, _, _ := s.inspect(ctx)
+	downgradeUnreadableReboundMarker(&state)
+	return state
+}
+
+// downgradeUnreadableReboundMarker turns the pre-mutation refusal into the
+// post-mutation report: the branch is where the mutation put it, and the only
+// thing unknown is whether any run validated that head.
+func downgradeUnreadableReboundMarker(state *State) {
+	if state == nil || state.Safety != "blocked_rebound_marker_unreadable" {
+		return
+	}
+	state.State = StateSynchronized
+	state.Relation = RelationEqual
+	markReboundValidationUnknown(state, "the branch reached the push-bound head, but whether any run validated it could not be read")
 }
 
 func equivalentDivergence(ctx context.Context, dir, local, pushed, base string) bool {
