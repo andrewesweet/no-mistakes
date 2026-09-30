@@ -148,3 +148,18 @@ func TestCaptureAcceptsADefaultBranchScopedRun(t *testing.T) {
 		t.Fatalf("captured cases = %d, want 1", len(cases))
 	}
 }
+
+// A round whose pinned trusted-config commit is no longer in the gate (an
+// orphaned commit after the default branch was rewritten, or a pruned object)
+// cannot establish the base branch its review scoped against, so it degrades to
+// the documented skip rather than failing the whole capture with a bare error.
+func TestCaptureSkipsARoundWhoseTrustedConfigCommitIsGone(t *testing.T) {
+	ctx := context.Background()
+	p, sourceDB, sourceRun, repo, _ := setupCapturedRun(t, ctx)
+	defer sourceDB.Close()
+
+	_, err := captureSecondRun(t, ctx, p, sourceDB, repo, "feature/pruned-trust", sourceRun.HeadSHA, sourceRun.BaseSHA, "", strings.Repeat("0", 40), "ignore_patterns: ['vendor']\n")
+	if !errors.Is(err, ErrNoCapturableReview) {
+		t.Fatalf("capture error = %v, want ErrNoCapturableReview so auto-capture reports a skip", err)
+	}
+}

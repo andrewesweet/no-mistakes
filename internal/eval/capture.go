@@ -206,7 +206,7 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 		}
 		trustedRepoConfig, err := repoConfigAt(ctx, gateDir, trustedSHA)
 		if err != nil {
-			return nil, fmt.Errorf("read review round %q trusted repository configuration: %w", round.ID, err)
+			return nil, fmt.Errorf("%w: review round %q pinned trusted configuration commit %s is no longer readable in the gate, so the base branch its review scoped against cannot be established: %v", ErrNoCapturableReview, round.ID, trustedSHA, err)
 		}
 		if base := capturedBaseBranch(run, trustedRepoConfig, repo.DefaultBranch); base != strings.TrimSpace(repo.DefaultBranch) {
 			return nil, fmt.Errorf("%w: review round %q was reviewed against base branch %q rather than the repository default %q, and replay restores only the default branch, so the case would be replayed and scored against a different diff; such a run stays out of the corpus until a case manifest records its scoping base", ErrNoCapturableReview, round.ID, base, strings.TrimSpace(repo.DefaultBranch))
