@@ -370,3 +370,33 @@ func TestCIStep_AdoptionFailsClosedWhenTheLiveBaseIsUnreported(t *testing.T) {
 		t.Fatalf("review approval = %v, want it untouched at %s", run.ReviewApprovedHeadSHA, approved)
 	}
 }
+
+// The forge-reported base is durable and is re-read as a ref name by every
+// later step, so a name Git cannot use is refused before anything is mutated -
+// the same validation every operator-facing writer of that field runs.
+func TestCIStep_AdoptionRefusesAnUnusableLiveBaseName(t *testing.T) {
+	t.Parallel()
+	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+	rewritten := pushDescendantRewrite(t, dir)
+
+	env := revalidateEnv(t, `[{"name":"test","state":"SUCCESS","bucket":"pass"}]`, "bad..base")
+	_, sctx, _ := revalidateContext(t, dir, upstream, baseSHA, headSHA, env)
+
+	outcome, err := (&steps.CIStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "not a usable branch name") {
+		t.Fatalf("outcome = %#v, err = %v, want the unusable base refused", outcome, err)
+	}
+	if got := stepstest.GitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("worktree head = %s, want the validated %s (the rewrite %s must not be adopted)", got, headSHA, rewritten)
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PRBaseBranch != nil {
+		t.Fatalf("persisted base = %q, want no base recorded", *run.PRBaseBranch)
+	}
+	if run.HeadSHA != headSHA {
+		t.Fatalf("durable run head = %s, want the validated %s", run.HeadSHA, headSHA)
+	}
+}

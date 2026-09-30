@@ -217,6 +217,9 @@ func resolveLivePRBase(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) (s
 	if liveBase == "" {
 		return "", fmt.Errorf("the pull request reported no live base branch before restarting at Review")
 	}
+	if _, err := ValidateRunPRBaseBranchName(liveBase); err != nil {
+		return "", fmt.Errorf("the pull request's live base branch is not a usable branch name: %w", err)
+	}
 	return liveBase, nil
 }
 
@@ -227,6 +230,10 @@ func resolveLivePRBase(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) (s
 func applyRunPRBase(sctx *pipeline.StepContext, liveBase string) error {
 	if liveBase == "" {
 		return nil
+	}
+	liveBase, err := ValidateRunPRBaseBranchName(liveBase)
+	if err != nil {
+		return fmt.Errorf("the pull request's live base branch is not a usable branch name: %w", err)
 	}
 	current := runPRBaseBranch(sctx)
 	if current == liveBase {

@@ -148,7 +148,7 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
 			return false, err
 		}
-		if err := recordHeadRewriteOverride(sctx, mergedHead); err != nil {
+		if err := s.recordHeadRewriteOverride(sctx, mergedHead); err != nil {
 			return false, err
 		}
 		notifyPRMerged(sctx)
@@ -160,7 +160,7 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "closed"); err != nil {
 			return false, err
 		}
-		if err := recordHeadRewriteOverride(sctx, ""); err != nil {
+		if err := s.recordHeadRewriteOverride(sctx, ""); err != nil {
 			return false, err
 		}
 		if sctx.Log != nil {
@@ -224,7 +224,9 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 		if headErr != nil {
 			liveHead = ""
 		}
-		return headRewriteOverrideReason(sctx, parked, liveHead), nil
+		if reason := s.headRewriteOverrideReason(sctx, parked, liveHead); reason != "" {
+			return reason, nil
+		}
 	}
 	checks, err := host.GetChecks(ctx, &scm.PR{Number: prNumber, URL: prURL})
 	if err != nil {
@@ -256,17 +258,23 @@ func parkedGateFindings(sctx *pipeline.StepContext) (string, error) {
 }
 
 // headRewriteOverrideReason names the unresolved condition a completion over a
-// published-head-rewrite park carries, or "" when the gate parked on something
-// else. Approving that park is allowed, but the checks it approves are the
-// forge's for a head this run validated nowhere, so the completion is recorded
-// as passed-with-override however green they are. liveHead may be empty when
-// the caller has not read the forge's head.
-func headRewriteOverrideReason(sctx *pipeline.StepContext, parkedFindings, liveHead string) string {
+// published-head-rewrite park carries, or "" when there is none. Approving that
+// park is allowed, but the checks it approves are the forge's for a head this
+// run validated nowhere, so the completion is recorded as passed-with-override
+// however green they are. A head the run OWNS is not that condition: the
+// rewrite resolved, so the completion is an ordinary pass and gets no record -
+// otherwise the durable text asserted the run owns nowhere a head it had just
+// been proved to own, naming the same SHA twice. liveHead may be empty when the
+// caller has not read the forge's head, which is not evidence of ownership.
+func (s *CIStep) headRewriteOverrideReason(sctx *pipeline.StepContext, parkedFindings, liveHead string) string {
 	if !pipeline.HasCIHeadRewriteRefusal(parkedFindings) {
 		return ""
 	}
 	live := "a head the forge did not report"
 	if head := strings.TrimSpace(liveHead); head != "" {
+		if s.ciRunOwnsHead(sctx, head) {
+			return ""
+		}
 		live = shortSHA(head)
 	}
 	return fmt.Sprintf(
@@ -280,12 +288,12 @@ func headRewriteOverrideReason(sctx *pipeline.StepContext, parkedFindings, liveH
 // verdict, so the completion can never read as an ordinary clean pass. The
 // write is fail-closed for the reason applyApprovalOverride records: a
 // swallowed failure completes the step as that plain pass.
-func recordHeadRewriteOverride(sctx *pipeline.StepContext, liveHead string) error {
+func (s *CIStep) recordHeadRewriteOverride(sctx *pipeline.StepContext, liveHead string) error {
 	parked, err := parkedGateFindings(sctx)
 	if err != nil {
 		return fmt.Errorf("read the parked CI gate findings: %w", err)
 	}
-	reason := headRewriteOverrideReason(sctx, parked, liveHead)
+	reason := s.headRewriteOverrideReason(sctx, parked, liveHead)
 	if reason == "" {
 		return nil
 	}

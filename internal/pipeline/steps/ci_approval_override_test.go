@@ -215,12 +215,12 @@ func TestCIStep_VerifyApprovalOverride_HeadRewriteParkIsNeverACleanPass(t *testi
 	}
 }
 
-// A pull request merged while the gate sat parked on a head rewrite resolves it
-// too, and on a provider without merged-proof nothing else checks the head, so
-// that completion carries the same override record rather than reading as an
-// ordinary pass. The merge proof has just read a head from the forge, so the
-// record names it instead of claiming the forge reported none.
-func TestCIStep_ReconcileApprovalGate_MergedPRRecordsTheHeadRewriteOverride(t *testing.T) {
+// A pull request merged at a head the run OWNS resolves the park and is an
+// ordinary clean pass: the merge proof has just shown the rewrite resolved, so
+// stamping passed-with-override would record "this run owns nowhere" about a
+// head it had been proved to own - naming the same SHA twice when the merged
+// head is the validated one.
+func TestCIStep_ReconcileApprovalGate_MergedAtAnOwnedHeadRecordsNoOverride(t *testing.T) {
 	t.Parallel()
 
 	sctx, validated, _ := headRewriteParkFixture(t, "MERGED")
@@ -243,11 +243,27 @@ func TestCIStep_ReconcileApprovalGate_MergedPRRecordsTheHeadRewriteOverride(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.OverrideReason == nil {
-		t.Fatal("override reason = nil, want the head rewrite recorded as unresolved")
+	if after.OverrideReason != nil {
+		t.Fatalf("override reason = %q, want none: the PR merged at a head this run owns", *after.OverrideReason)
 	}
-	if !strings.Contains(*after.OverrideReason, shortSHA(validated)) || !strings.Contains(*after.OverrideReason, shortSHA(mergedHead)) {
-		t.Fatalf("override reason = %q, want it to name the validated head %s and the merged head %s", *after.OverrideReason, shortSHA(validated), shortSHA(mergedHead))
+}
+
+// The same rule on the approval path: an operator who restores the branch to
+// the run's own validated head before approving gets the ordinary live-check
+// verification, not a head-rewrite override naming that head as foreign.
+func TestCIStep_VerifyApprovalOverride_HeadRewriteResolvedOntoAnOwnedHead(t *testing.T) {
+	t.Parallel()
+
+	sctx, validated, _ := headRewriteParkFixture(t, "OPEN")
+	// The branch is force-pushed back to the head the run validated.
+	gitCmd(t, sctx.WorkDir, "push", "--force", "origin", validated+":refs/heads/feature")
+
+	unresolved, err := (&CIStep{}).VerifyApprovalOverride(sctx)
+	if err != nil {
+		t.Fatalf("VerifyApprovalOverride() error = %v", err)
+	}
+	if unresolved != "" {
+		t.Fatalf("unresolved = %q, want the green live checks to pass cleanly once the branch is back on the validated head", unresolved)
 	}
 }
 

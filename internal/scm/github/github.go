@@ -441,9 +441,10 @@ func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) 
 // last-pushed head and the caller worktree's HEAD), any of which may carry the
 // merge when the branch was rewritten outside the run and then merged. A merge at any other head is a
 // foreign merge: it is refused with scm.ErrHeadChanged rather than reported
-// as the run's own outcome. Completeness (merge commit, timestamp, merger)
-// is required whenever the PR is merged, so an attestation written from this
-// proof always has all three fields.
+// as the run's own outcome. The merge commit and timestamp are required
+// whenever the PR is merged, so an attestation written from this proof always
+// names both; the merging identity is optional, because an app identity or a
+// deleted account leaves it empty.
 func (h *Host) GetMergedProof(ctx context.Context, pr *scm.PR, ownHeads []string) (scm.MergedProof, error) {
 	selector, err := prSelector(pr)
 	if err != nil {
@@ -498,7 +499,10 @@ func (h *Host) GetMergedProof(ctx context.Context, pr *scm.PR, ownHeads []string
 	if strings.EqualFold(strings.TrimSpace(response.State), "MERGED") {
 		proof.Merged = true
 	}
-	if proof.Merged && (proof.MergeCommitSHA == "" || proof.MergedAt.IsZero() || proof.MergedBy == "") {
+	// mergedBy is optional evidence: an app identity or a deleted account
+	// leaves it empty, and that is not a reason to fail a run over a merge the
+	// commit and timestamp already prove.
+	if proof.Merged && (proof.MergeCommitSHA == "" || proof.MergedAt.IsZero()) {
 		return scm.MergedProof{}, errors.New("gh returned incomplete evidence for a merged PR")
 	}
 	if !headIsOwned(proof.HeadSHA, ownHeads) {

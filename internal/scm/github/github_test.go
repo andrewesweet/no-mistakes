@@ -2068,9 +2068,33 @@ func TestGetMergedProofRefusesAMergeAtAHeadTheRunOwnsNowhere(t *testing.T) {
 	}
 }
 
-// Completeness is required whenever the PR is merged, so an attestation
-// written from this proof always has all three fields.
+// The merge commit and timestamp are required whenever the PR is merged, so an
+// attestation written from this proof always names both.
 func TestGetMergedProofRefusesIncompleteEvidenceForAMergedPR(t *testing.T) {
+	t.Parallel()
+
+	for name, payload := range map[string]string{
+		"no merge commit": `{"number":42,"url":"https://github.com/test/repo/pull/42","state":"MERGED","headRefOid":"1111111111111111111111111111111111111111","mergeCommit":{"oid":""},"mergedAt":"2026-09-01T12:00:00Z","mergedBy":{"login":"reviewer"}}`,
+		"no merged at":    `{"number":42,"url":"https://github.com/test/repo/pull/42","state":"MERGED","headRefOid":"1111111111111111111111111111111111111111","mergeCommit":{"oid":"abc"},"mergedAt":"","mergedBy":{"login":"reviewer"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{
+				"gh pr view 42 --repo test/repo --json number,url,state,headRefOid,mergeCommit,mergedAt,mergedBy": {stdout: payload + "\n"},
+			}), nil, "", "test/repo")
+
+			_, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, []string{"1111111111111111111111111111111111111111"})
+			if err == nil || !strings.Contains(err.Error(), "incomplete evidence") {
+				t.Fatalf("GetMergedProof() error = %v, want incomplete-evidence refusal", err)
+			}
+		})
+	}
+}
+
+// The merging identity is not evidence of the merge: GitHub reports no login
+// for a merge by an app identity or a deleted account, and failing the run
+// there refused a merge the commit and timestamp already proved.
+func TestGetMergedProofAcceptsAMergeWithNoMergingIdentity(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
@@ -2079,9 +2103,15 @@ func TestGetMergedProofRefusesIncompleteEvidenceForAMergedPR(t *testing.T) {
 		},
 	}), nil, "", "test/repo")
 
-	_, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, []string{"1111111111111111111111111111111111111111"})
-	if err == nil || !strings.Contains(err.Error(), "incomplete evidence") {
-		t.Fatalf("GetMergedProof() error = %v, want incomplete-evidence refusal", err)
+	proof, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, []string{"1111111111111111111111111111111111111111"})
+	if err != nil {
+		t.Fatalf("GetMergedProof() error = %v, want the merge accepted without a merging identity", err)
+	}
+	if !proof.Merged || proof.MergeCommitSHA != "abc" || proof.MergedAt.IsZero() {
+		t.Fatalf("proof = %+v, want a complete merge proof", proof)
+	}
+	if proof.MergedBy != "" {
+		t.Fatalf("MergedBy = %q, want it left empty", proof.MergedBy)
 	}
 }
 
