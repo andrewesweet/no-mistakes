@@ -705,3 +705,45 @@ func TestSyncOntoAReboundUnvalidatedHeadKeepsSayingSo(t *testing.T) {
 		t.Fatalf("next action = %#v, want the validation run offered on a head no run validated", state.NextAction)
 	}
 }
+
+// Apply's own report consumes the marker for its verdict, so it must know
+// whether the read succeeded: a fast-forward that lands the branch exactly on
+// the rebound head while the marker is unreadable can neither be called
+// synchronized nor be called unvalidated, and reporting the former hands the
+// operator a head no run validated as finished work.
+func TestApplyOntoAReboundHeadRefusesWhenTheMarkerIsUnreadable(t *testing.T) {
+	t.Parallel()
+
+	f, _ := newRemoteRewrittenFixture(t)
+	writer := cloneRemoteBranch(t, f.remote)
+	mustRun(t, writer, "checkout", "-B", "rewrite-descendant", f.old)
+	mustWrite(t, filepath.Join(writer, "rewritten.txt"), "rewritten outside the pipeline\n")
+	mustRun(t, writer, "add", "rewritten.txt")
+	mustRun(t, writer, "commit", "-m", "rewritten outside the pipeline")
+	rewritten := mustRun(t, writer, "rev-parse", "HEAD")
+	mustRun(t, writer, "push", "--force", "origin", "HEAD:refs/heads/feature/sync")
+
+	if recovered := f.service.Recover(f.ctx, false); !recovered.Recovered {
+		t.Fatalf("recover = %#v", recovered)
+	}
+
+	raw, err := sql.Open("sqlite", filepath.Join(filepath.Dir(f.local), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`DROP TABLE unvalidated_rebound_heads`); err != nil {
+		t.Fatal(err)
+	}
+
+	state := f.service.Apply(f.ctx)
+	if state.Local.Head != rewritten {
+		t.Fatalf("local head = %s, want the fast-forward to have reached %s", state.Local.Head, rewritten)
+	}
+	if state.Safety != "blocked_rebound_marker_unreadable" || state.State != StateAmbiguousContext {
+		t.Fatalf("state = %#v, want the unreadable marker to refuse the synchronized verdict", state)
+	}
+	if state.NextAction == nil || state.NextAction.Code != "retry" {
+		t.Fatalf("next action = %#v, want the re-check offered", state.NextAction)
+	}
+}

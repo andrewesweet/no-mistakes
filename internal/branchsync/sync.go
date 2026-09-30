@@ -520,6 +520,10 @@ func (s *Service) Apply(ctx context.Context) State {
 		plan.Error = "HEAD reached the exact pipeline-pushed commit, but a Git hook left the worktree non-clean; no recovery was attempted"
 		return plan
 	}
+	if !s.annotateUnvalidatedRebound(&plan, plan.Pipeline.PushedHead) {
+		blockUnreadableReboundMarker(&plan, "HEAD reached the exact pipeline-pushed commit, but whether any run validated that head could not be read")
+		return plan
+	}
 	plan.State = StateSynchronized
 	plan.Relation = RelationEqual
 	plan.Safety = "already_synchronized"
@@ -1871,10 +1875,7 @@ func (s *Service) classifyRelation(ctx context.Context, state *State, pushed, ba
 	readable := s.annotateUnvalidatedRebound(state, pushed)
 	if state.Local.Head == pushed {
 		if !readable {
-			state.State = StateAmbiguousContext
-			state.Safety = "blocked_rebound_marker_unreadable"
-			state.Error = "whether any run validated the push-bound head could not be read; no files or refs were changed"
-			state.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --check"}
+			blockUnreadableReboundMarker(state, "whether any run validated the push-bound head could not be read; no files or refs were changed")
 			return
 		}
 		state.State = StateSynchronized
@@ -1964,6 +1965,17 @@ func (s *Service) annotateUnvalidatedRebound(state *State, pushed string) bool {
 		state.BoundHeadUnvalidated = bound
 	}
 	return true
+}
+
+// blockUnreadableReboundMarker refuses a branch that sits exactly on the push
+// binding while the marker deciding that relation's verdict could not be read:
+// the report can neither call the head validated nor call it unvalidated, so it
+// states the read failure and offers the re-check instead.
+func blockUnreadableReboundMarker(state *State, reason string) {
+	state.State = StateAmbiguousContext
+	state.Safety = "blocked_rebound_marker_unreadable"
+	state.Error = reason
+	state.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --check"}
 }
 
 // reboundNextAction is what a branch sitting exactly on a head no run

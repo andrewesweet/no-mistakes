@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -216,11 +218,22 @@ func TestCIStep_VerifyApprovalOverride_HeadRewriteParkIsNeverACleanPass(t *testi
 // A pull request merged while the gate sat parked on a head rewrite resolves it
 // too, and on a provider without merged-proof nothing else checks the head, so
 // that completion carries the same override record rather than reading as an
-// ordinary pass.
+// ordinary pass. The merge proof has just read a head from the forge, so the
+// record names it instead of claiming the forge reported none.
 func TestCIStep_ReconcileApprovalGate_MergedPRRecordsTheHeadRewriteOverride(t *testing.T) {
 	t.Parallel()
 
 	sctx, validated, _ := headRewriteParkFixture(t, "MERGED")
+	// The run also published a later head, and that is the one the pull
+	// request was merged at: an own head, so the merge proof accepts it.
+	mergedHead := gitCmd(t, sctx.WorkDir, "commit-tree", gitCmd(t, sctx.WorkDir, "rev-parse", "HEAD^{tree}"), "-p", validated, "-m", "published later")
+	if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
+		HeadSHA: mergedHead, TargetKind: "upstream",
+		TargetFingerprint: branchsync.TargetFingerprint(sctx.Repo.UpstreamURL), Ref: "refs/heads/feature",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Env = append(sctx.Env, "FAKE_CLI_PR_HEAD_SHA="+mergedHead)
 
 	resolved, err := (&CIStep{}).ReconcileApprovalGate(sctx)
 	if err != nil || !resolved {
@@ -230,8 +243,11 @@ func TestCIStep_ReconcileApprovalGate_MergedPRRecordsTheHeadRewriteOverride(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.OverrideReason == nil || !strings.Contains(*after.OverrideReason, shortSHA(validated)) {
-		t.Fatalf("override reason = %v, want the head rewrite recorded as unresolved", after.OverrideReason)
+	if after.OverrideReason == nil {
+		t.Fatal("override reason = nil, want the head rewrite recorded as unresolved")
+	}
+	if !strings.Contains(*after.OverrideReason, shortSHA(validated)) || !strings.Contains(*after.OverrideReason, shortSHA(mergedHead)) {
+		t.Fatalf("override reason = %q, want it to name the validated head %s and the merged head %s", *after.OverrideReason, shortSHA(validated), shortSHA(mergedHead))
 	}
 }
 

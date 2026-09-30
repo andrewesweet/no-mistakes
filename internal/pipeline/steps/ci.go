@@ -141,13 +141,14 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 	}
 	switch state {
 	case scm.PRStateMerged:
-		if err := verifyMergedProof(sctx.Ctx, host, &scm.PR{Number: prNumber, URL: prURL}, s.ownValidatedHeads(sctx)); err != nil {
+		mergedHead, err := verifyMergedProof(sctx.Ctx, host, &scm.PR{Number: prNumber, URL: prURL}, s.ownValidatedHeads(sctx))
+		if err != nil {
 			return false, err
 		}
 		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
 			return false, err
 		}
-		if err := recordHeadRewriteOverride(sctx, ""); err != nil {
+		if err := recordHeadRewriteOverride(sctx, mergedHead); err != nil {
 			return false, err
 		}
 		notifyPRMerged(sctx)
@@ -291,23 +292,26 @@ func recordHeadRewriteOverride(sctx *pipeline.StepContext, liveHead string) erro
 	return sctx.DB.SetStepOverrideReason(sctx.StepResultID, reason)
 }
 
-func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, ownHeads []string) error {
+// verifyMergedProof returns the head the proof names as merged, or "" when the
+// provider cannot prove one - a caller naming that head in a durable record
+// must say so only when the forge actually reported it.
+func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, ownHeads []string) (string, error) {
 	if !host.Capabilities().MergedProof {
-		return nil
+		return "", nil
 	}
 	proofHost, ok := host.(scm.MergedProofHost)
 	if !ok {
-		return fmt.Errorf("SCM provider advertises merged proof but does not implement it")
+		return "", fmt.Errorf("SCM provider advertises merged proof but does not implement it")
 	}
 	proof, err := proofHost.GetMergedProof(ctx, pr, ownHeads)
 	if err != nil {
-		return fmt.Errorf("verify merged PR proof: %w", err)
+		return "", fmt.Errorf("verify merged PR proof: %w", err)
 	}
 	if !proof.Merged {
-		return fmt.Errorf("verify merged PR proof: PR %s is not merged", pr.Number)
+		return "", fmt.Errorf("verify merged PR proof: PR %s is not merged", pr.Number)
 	}
 	if proof.Number != pr.Number || proof.URL != pr.URL {
-		return fmt.Errorf("verify merged PR proof: proof identifies PR %s at %q, want PR %s at %q", proof.Number, proof.URL, pr.Number, pr.URL)
+		return "", fmt.Errorf("verify merged PR proof: proof identifies PR %s at %q, want PR %s at %q", proof.Number, proof.URL, pr.Number, pr.URL)
 	}
 	// Membership is re-checked here against the same heads the host validated,
 	// so a host that validates only its primary head can never hand back a
@@ -315,9 +319,9 @@ func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, ownHeads 
 	if len(ownHeads) > 0 && !slices.ContainsFunc(ownHeads, func(head string) bool {
 		return strings.EqualFold(strings.TrimSpace(head), proof.HeadSHA)
 	}) {
-		return fmt.Errorf("verify merged PR proof: %w: expected one of %s, got %s", scm.ErrHeadChanged, strings.Join(ownHeads, ", "), proof.HeadSHA)
+		return "", fmt.Errorf("verify merged PR proof: %w: expected one of %s, got %s", scm.ErrHeadChanged, strings.Join(ownHeads, ", "), proof.HeadSHA)
 	}
-	return nil
+	return proof.HeadSHA, nil
 }
 
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutcome, err error) {
@@ -571,7 +575,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			sctx.Log(fmt.Sprintf("warning: could not check PR state: %v", err))
 			prStateKnown = false
 		} else if state == scm.PRStateMerged {
-			if err := verifyMergedProof(ctx, host, pr, s.ownValidatedHeads(sctx)); err != nil {
+			if _, err := verifyMergedProof(ctx, host, pr, s.ownValidatedHeads(sctx)); err != nil {
 				return nil, err
 			}
 			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
