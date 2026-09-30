@@ -323,12 +323,15 @@ func (h *Host) GetMergeableState(ctx context.Context, pr *scm.PR) (scm.Mergeable
 	return scm.MergeableOK, nil
 }
 
-func (h *Host) GetMergedProof(ctx context.Context, pr *scm.PR, expectedHead string, _ []string) (scm.MergedProof, error) {
+func (h *Host) GetMergedProof(ctx context.Context, pr *scm.PR, ownHeads []string) (scm.MergedProof, error) {
 	number, err := h.validateInputPR(pr)
 	if err != nil {
 		return scm.MergedProof{}, err
 	}
-	expectedHead = strings.TrimSpace(expectedHead)
+	expectedHead := ""
+	if len(ownHeads) > 0 {
+		expectedHead = strings.TrimSpace(ownHeads[0])
+	}
 	if expectedHead == "" {
 		return scm.MergedProof{}, errors.New("Forgejo merged proof requires an expected head SHA")
 	}

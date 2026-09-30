@@ -2009,7 +2009,7 @@ func TestGetMergedProofAcceptsMergesAtTheExpectedHead(t *testing.T) {
 		},
 	}), nil, "", "test/repo")
 
-	proof, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, "1111111111111111111111111111111111111111", nil)
+	proof, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, []string{"1111111111111111111111111111111111111111"})
 	if err != nil {
 		t.Fatalf("GetMergedProof() error = %v", err)
 	}
@@ -2031,7 +2031,7 @@ func TestGetMergedProofAcceptsMergesAtAnotherOwnHead(t *testing.T) {
 		},
 	}), nil, "", "test/repo")
 
-	proof, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, "1111111111111111111111111111111111111111", []string{adopted})
+	proof, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, []string{"1111111111111111111111111111111111111111", adopted})
 	if err != nil {
 		t.Fatalf("GetMergedProof() error = %v", err)
 	}
@@ -2053,13 +2053,18 @@ func TestGetMergedProofRefusesAMergeAtAHeadTheRunOwnsNowhere(t *testing.T) {
 		},
 	}), nil, "", "test/repo")
 
-	_, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, "1111111111111111111111111111111111111111", []string{"2222222222222222222222222222222222222222"})
+	_, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, []string{"1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222"})
 	if !errors.Is(err, scm.ErrHeadChanged) {
 		t.Fatalf("GetMergedProof() error = %v, want ErrHeadChanged", err)
 	}
-	if !strings.Contains(err.Error(), "expected 1111111111111111111111111111111111111111") ||
-		!strings.Contains(err.Error(), "got "+foreign) {
-		t.Fatalf("error = %v, want both the expected and the observed head named", err)
+	for _, want := range []string{
+		"1111111111111111111111111111111111111111",
+		"2222222222222222222222222222222222222222",
+		"got " + foreign,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want every accepted head and the observed head named (%s)", err, want)
+		}
 	}
 }
 
@@ -2074,7 +2079,7 @@ func TestGetMergedProofRefusesIncompleteEvidenceForAMergedPR(t *testing.T) {
 		},
 	}), nil, "", "test/repo")
 
-	_, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, "1111111111111111111111111111111111111111", nil)
+	_, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, []string{"1111111111111111111111111111111111111111"})
 	if err == nil || !strings.Contains(err.Error(), "incomplete evidence") {
 		t.Fatalf("GetMergedProof() error = %v, want incomplete-evidence refusal", err)
 	}
@@ -2091,7 +2096,7 @@ func TestGetMergedProofHeadMembershipIsCaseInsensitive(t *testing.T) {
 		},
 	}), nil, "", "test/repo")
 
-	if _, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, "aaaa111111111111111111111111111111111111", nil); err != nil {
+	if _, err := host.GetMergedProof(context.Background(), &scm.PR{Number: "42"}, []string{"aaaa111111111111111111111111111111111111"}); err != nil {
 		t.Fatalf("GetMergedProof() error = %v, want case-insensitive ownership", err)
 	}
 }

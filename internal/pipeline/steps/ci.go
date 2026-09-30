@@ -229,11 +229,7 @@ func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, ownHeads 
 	if !ok {
 		return fmt.Errorf("SCM provider advertises merged proof but does not implement it")
 	}
-	var expectedHead string
-	if len(ownHeads) > 0 {
-		expectedHead = ownHeads[0]
-	}
-	proof, err := proofHost.GetMergedProof(ctx, pr, expectedHead, ownHeads)
+	proof, err := proofHost.GetMergedProof(ctx, pr, ownHeads)
 	if err != nil {
 		return fmt.Errorf("verify merged PR proof: %w", err)
 	}
@@ -249,7 +245,7 @@ func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, ownHeads 
 	if len(ownHeads) > 0 && !slices.ContainsFunc(ownHeads, func(head string) bool {
 		return strings.EqualFold(strings.TrimSpace(head), proof.HeadSHA)
 	}) {
-		return fmt.Errorf("verify merged PR proof: %w: expected %s, got %s", scm.ErrHeadChanged, expectedHead, proof.HeadSHA)
+		return fmt.Errorf("verify merged PR proof: %w: expected one of %s, got %s", scm.ErrHeadChanged, strings.Join(ownHeads, ", "), proof.HeadSHA)
 	}
 	return nil
 }
@@ -539,7 +535,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			if headErr != nil {
 				sctx.Log(fmt.Sprintf("warning: could not read the published branch head: %v", headErr))
 			} else if !s.ciRunOwnsHead(sctx, liveHead) {
-				outcome, adoptErr := s.adoptPublishedHeadRewrite(sctx, host, pr, liveHead)
+				outcome, adoptErr := s.adoptPublishedHeadRewrite(sctx, host, pr, "the push target served head", liveHead)
 				if adoptErr != nil {
 					return nil, adoptErr
 				}
@@ -602,7 +598,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			// never validated. The same adoption applies before any of those
 			// results can establish readiness.
 			if observed := strings.TrimSpace(pr.HeadSHA); observed != "" && !s.ciRunOwnsHead(sctx, observed) {
-				outcome, adoptErr := s.adoptPublishedHeadRewrite(sctx, host, pr, observed)
+				outcome, adoptErr := s.adoptPublishedHeadRewrite(sctx, host, pr, "the pull request reports head", observed)
 				if adoptErr != nil {
 					return nil, adoptErr
 				}

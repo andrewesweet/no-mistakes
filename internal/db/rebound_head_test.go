@@ -29,7 +29,7 @@ func TestUnvalidatedReboundHeadLifecycle(t *testing.T) {
 		t.Fatalf("missing marker = (%q, %v), want not found", "", ok)
 	}
 
-	if err := d.RecordUnvalidatedReboundHead(repo.ID, ref, "1111111111111111111111111111111111111111"); err != nil {
+	if err := recordUnvalidatedReboundHead(d.sql, repo.ID, ref, "1111111111111111111111111111111111111111"); err != nil {
 		t.Fatal(err)
 	}
 	head, ok, err := d.GetUnvalidatedReboundHead(repo.ID, ref)
@@ -39,7 +39,7 @@ func TestUnvalidatedReboundHeadLifecycle(t *testing.T) {
 
 	// A rebind of the same ref replaces the row instead of failing the
 	// unique constraint.
-	if err := d.RecordUnvalidatedReboundHead(repo.ID, ref, "2222222222222222222222222222222222222222"); err != nil {
+	if err := recordUnvalidatedReboundHead(d.sql, repo.ID, ref, "2222222222222222222222222222222222222222"); err != nil {
 		t.Fatal(err)
 	}
 	head, ok, err = d.GetUnvalidatedReboundHead(repo.ID, ref)
@@ -48,7 +48,7 @@ func TestUnvalidatedReboundHeadLifecycle(t *testing.T) {
 	}
 
 	// Markers are per ref: another branch's binding is untouched.
-	if err := d.RecordUnvalidatedReboundHead(repo.ID, "refs/heads/other", "3333333333333333333333333333333333333333"); err != nil {
+	if err := recordUnvalidatedReboundHead(d.sql, repo.ID, "refs/heads/other", "3333333333333333333333333333333333333333"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -78,13 +78,13 @@ func TestUnvalidatedReboundHeadRequiresRepoRefAndHead(t *testing.T) {
 	t.Parallel()
 	d := openTestDB(t)
 
-	if err := d.RecordUnvalidatedReboundHead("", "refs/heads/feature", "head"); err == nil {
+	if err := recordUnvalidatedReboundHead(d.sql, "", "refs/heads/feature", "head"); err == nil {
 		t.Fatal("empty repo id must be refused")
 	}
-	if err := d.RecordUnvalidatedReboundHead("repo-1", "", "head"); err == nil {
+	if err := recordUnvalidatedReboundHead(d.sql, "repo-1", "", "head"); err == nil {
 		t.Fatal("empty ref must be refused")
 	}
-	if err := d.RecordUnvalidatedReboundHead("repo-1", "refs/heads/feature", ""); err == nil {
+	if err := recordUnvalidatedReboundHead(d.sql, "repo-1", "refs/heads/feature", ""); err == nil {
 		t.Fatal("empty head must be refused")
 	}
 }

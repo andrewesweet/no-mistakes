@@ -100,6 +100,7 @@ func parkPublishedHeadRewrite(recorded, worktreeHead, liveHead, reason string) *
 	findings := Findings{
 		Summary: "The pull request branch moved to a head this run owns nowhere; decide before anything is adopted",
 		Items: []types.Finding{{
+			ID:       types.FindingIDCIHeadRewrite,
 			Severity: types.FindingSeverityWarning,
 			Action:   types.ActionAskUser,
 			Category: types.FindingCategoryCIHeadRewrite,
@@ -124,22 +125,24 @@ func parkPublishedHeadRewrite(recorded, worktreeHead, liveHead, reason string) *
 // Rebase are deliberately skipped (their content is base-relative and the
 // restart re-decides it), and the PR step will only refresh the body of the
 // existing pull request.
-func (s *CIStep) adoptPublishedHeadRewrite(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, liveHead string) (*pipeline.StepOutcome, error) {
+func (s *CIStep) adoptPublishedHeadRewrite(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, observer, liveHead string) (*pipeline.StepOutcome, error) {
 	recorded := strings.TrimSpace(sctx.Run.HeadSHA)
 	clearCIMonitorReady(sctx)
 	sctx.Log(fmt.Sprintf("pull request branch head moved outside the run (%s -> %s); adopting the live head and restarting at Review", shortSHA(recorded), shortSHA(liveHead)))
 
 	target, err := fetchVerifiedPublishedHead(sctx)
 	if err != nil {
-		return nil, err
+		sctx.Log(fmt.Sprintf("warning: not adopting anything this poll: %v", err))
+		return nil, nil
 	}
 	if s.ciRunOwnsHead(sctx, target) {
-		sctx.Log(fmt.Sprintf("warning: not adopting anything this poll: the pull request reports head %s, but the push target serves %s, which this run owns - no check result for %s can be read, so the monitor keeps waiting for the two to agree", shortSHA(liveHead), shortSHA(target), shortSHA(liveHead)))
+		sctx.Log(fmt.Sprintf("warning: not adopting anything this poll: %s %s, but the push target serves %s, which this run owns - no check result for %s can be read, so the monitor keeps waiting for the two to agree", observer, shortSHA(liveHead), shortSHA(target), shortSHA(liveHead)))
 		return nil, nil
 	}
 	worktreeHead, err := stepGitHeadSHA(sctx)
 	if err != nil {
-		return nil, fmt.Errorf("resolve the run worktree head before adopting %s: %w", shortSHA(target), err)
+		sctx.Log(fmt.Sprintf("warning: not adopting %s this poll: the run worktree head could not be resolved: %v", shortSHA(target), err))
+		return nil, nil
 	}
 	if reason := adoptableHeadRefusal(sctx, target); reason != "" {
 		sctx.Log(fmt.Sprintf("not adopting %s: %s", shortSHA(target), reason))

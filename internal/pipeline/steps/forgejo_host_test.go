@@ -104,7 +104,11 @@ func (h *mergedProofTestHost) Capabilities() scm.Capabilities {
 	return scm.Capabilities{MergedProof: true}
 }
 
-func (h *mergedProofTestHost) GetMergedProof(_ context.Context, _ *scm.PR, expectedHead string, _ []string) (scm.MergedProof, error) {
+func (h *mergedProofTestHost) GetMergedProof(_ context.Context, _ *scm.PR, ownHeads []string) (scm.MergedProof, error) {
+	expectedHead := ""
+	if len(ownHeads) > 0 {
+		expectedHead = ownHeads[0]
+	}
 	if h.err != nil {
 		return scm.MergedProof{}, h.err
 	}

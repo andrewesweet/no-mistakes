@@ -194,10 +194,12 @@ func TestCIStep_ParksOnAPublishedHeadRewriteWithADirtyWorktree(t *testing.T) {
 
 // The checks read is the second observer of the pull request's live head: a
 // rewrite that lands between the branch-head read and the checks read still
-// cannot report checks for a head the run never validated. With the push
-// target unreadable the adoption cannot verify anything, so the step fails
-// closed instead of passing checks through.
-func TestCIStep_ChecksReadRefusesToReportChecksWhenTheProviderNamesAForeignHead(t *testing.T) {
+// cannot report checks for a head the run never validated. With the push target
+// unreadable the adoption can verify nothing, so it adopts nothing and the
+// monitor waits and reads again - the same warn-and-re-poll the branch-head
+// read one call earlier does, rather than failing the whole run over a
+// transient ls-remote blip. No check result is reported meanwhile.
+func TestCIStep_ChecksReadWaitsRatherThanReportingChecksForAForeignHead(t *testing.T) {
 	t.Parallel()
 	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
 
@@ -211,16 +213,33 @@ func TestCIStep_ChecksReadRefusesToReportChecksWhenTheProviderNamesAForeignHead(
 	env := append(revalidateEnv(t, `[{"name":"test","state":"SUCCESS","bucket":"pass"}]`, ""), "FAKE_CLI_PR_HEAD_SHA="+ghost)
 	_, sctx, logs := revalidateContext(t, dir, upstream, baseSHA, headSHA, env)
 
-	_, err := (&steps.CIStep{}).Execute(sctx)
-	if err == nil || !strings.Contains(err.Error(), "re-read the pull request branch head") {
-		t.Fatalf("error = %v, want the adoption's fail-closed refusal", err)
+	polls := 0
+	step := (&steps.CIStep{}).SetWaitForNextPoll(func(ctx context.Context, interval time.Duration) error {
+		polls++
+		if polls >= 2 {
+			return errors.New("stop polling")
+		}
+		return nil
+	})
+	outcome, err := step.Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "stop polling") {
+		t.Fatalf("outcome = %#v, err = %v, want the monitor to have kept polling", outcome, err)
 	}
 	joined := strings.Join(*logs, "\n")
-	if !strings.Contains(joined, "warning: could not read the published branch head") {
-		t.Fatalf("log is missing the unreadable-target warning:\n%s", joined)
+	for _, want := range []string{"warning: could not read the published branch head", "not adopting anything this poll"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("log is missing %q:\n%s", want, joined)
+		}
 	}
 	if got := stepstest.GitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
 		t.Fatalf("worktree head moved to %s", got)
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.HeadSHA != headSHA {
+		t.Fatalf("durable run head = %s, want it untouched", run.HeadSHA)
 	}
 }
 

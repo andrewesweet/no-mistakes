@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -577,18 +578,25 @@ func TestPublicationClearsTheUnvalidatedBoundHeadMarker(t *testing.T) {
 func TestStaleMarkerForADifferentHeadAnnotatesNothing(t *testing.T) {
 	t.Parallel()
 
-	f, rewritten := newRemoteRewrittenFixture(t)
-	if err := f.db.RecordUnvalidatedReboundHead(f.repo.ID, "refs/heads/feature/sync", rewritten); err != nil {
+	f, _ := newRemoteRewrittenFixture(t)
+	// The rebind is the only writer of the marker, so the stale state is made
+	// the way it really arises: recover onto the rewritten head, then put the
+	// binding back where it was.
+	if recovered := f.service.Recover(f.ctx, false); !recovered.Recovered {
+		t.Fatalf("recover = %#v", recovered)
+	}
+	if err := f.db.UpdateRunPushBinding(f.run.ID, db.PushBinding{
+		HeadSHA: f.pushed, TargetKind: "upstream",
+		TargetFingerprint: TargetFingerprint(f.remote), Ref: "refs/heads/feature/sync",
+	}); err != nil {
 		t.Fatal(err)
 	}
-	// The branch's binding still names f.pushed, not rewritten, so the marker
-	// (which names rewritten) says nothing about this relation.
+	// The binding now names f.pushed again, not rewritten, so the marker
+	// (which names rewritten) says nothing about this relation, whatever the
+	// relation itself turns out to be.
 	state := f.service.Refresh(f.ctx)
 	if state.BoundHeadUnvalidated != "" {
 		t.Fatalf("state = %#v, want no annotation from a marker naming another head", state)
-	}
-	if state.NextAction == nil || state.NextAction.Code != "recover_remote_rewritten" {
-		t.Fatalf("next action = %#v, want the ordinary recovery offer", state.NextAction)
 	}
 }
 

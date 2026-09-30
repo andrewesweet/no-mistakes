@@ -111,6 +111,25 @@ const (
 	FindingCategoryCIHeadRewrite = "ci-head-rewrite"
 )
 
+// FindingIDCIHeadRewrite is the fixed ID of that park's single finding, so an
+// operator can select it by name the way every other gate finding can be
+// selected. The automatic resolvers key on the category, not on this ID.
+const FindingIDCIHeadRewrite = "ci-head-rewrite-refusal"
+
+// HasCIHeadRewrite reports whether findings carry the CI monitor's
+// published-head-rewrite park. Keyed on the category, the same way
+// HasReviewQuestion is, because the park is what makes the head decision an
+// operator's: no verdict an automatic resolver can send settles it, and
+// approving it reports checks for a head the run never validated.
+func HasCIHeadRewrite(findings Findings) bool {
+	for _, item := range findings.Items {
+		if item.Category == FindingCategoryCIHeadRewrite {
+			return true
+		}
+	}
+	return false
+}
+
 // FindingCategoryReviewQuestion marks the synthetic finding the review step
 // emits for each question its reviewer asked and nobody has answered yet. It
 // is always an ask-user warning, which is what parks the step in

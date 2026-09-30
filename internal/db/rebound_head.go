@@ -12,16 +12,13 @@ type reboundHeadExecer interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }
 
-// RecordUnvalidatedReboundHead durably marks ref's rebound head as one no run
-// has validated. Only the rewritten-remote recovery's compare-and-swap writes
-// this state, so the row exists exactly while the branch's push binding names
-// a head the pipeline never validated. A later publication of the exact head
-// by any run clears it (ClearUnvalidatedReboundHeadOnPublication); rebinding
-// the same ref again replaces the row.
-func (d *DB) RecordUnvalidatedReboundHead(repoID, ref, head string) error {
-	return recordUnvalidatedReboundHead(d.sql, repoID, ref, head)
-}
-
+// recordUnvalidatedReboundHead durably marks ref's rebound head as one no run
+// has validated. The rewritten-remote recovery's compare-and-swap is the only
+// writer, and it writes inside that transaction (RebindRunPushedHead), so the
+// row exists exactly while the branch's push binding names a head the pipeline
+// never validated. A later publication of the exact head by any run clears it
+// (ClearUnvalidatedReboundHeadOnPublication); rebinding the same ref again
+// replaces the row.
 func recordUnvalidatedReboundHead(ex reboundHeadExecer, repoID, ref, head string) error {
 	if repoID == "" || ref == "" || head == "" {
 		return errors.New("record unvalidated rebound head: repo, ref, and head are required")
