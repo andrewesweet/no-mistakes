@@ -195,10 +195,9 @@ func TestCIStep_ParksOnAPublishedHeadRewriteWithADirtyWorktree(t *testing.T) {
 // The checks read is the second observer of the pull request's live head: a
 // rewrite that lands between the branch-head read and the checks read still
 // cannot report checks for a head the run never validated. With the push target
-// unreadable the adoption can verify nothing, so it adopts nothing and the
-// monitor waits and reads again - the same warn-and-re-poll the branch-head
-// read one call earlier does, rather than failing the whole run over a
-// transient ls-remote blip. No check result is reported meanwhile.
+// unreadable nothing can establish ownership, so the poll reads no check at all
+// and the monitor waits and reads again, rather than failing the whole run over
+// a transient ls-remote blip.
 func TestCIStep_ChecksReadWaitsRatherThanReportingChecksForAForeignHead(t *testing.T) {
 	t.Parallel()
 	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
@@ -226,7 +225,7 @@ func TestCIStep_ChecksReadWaitsRatherThanReportingChecksForAForeignHead(t *testi
 		t.Fatalf("outcome = %#v, err = %v, want the monitor to have kept polling", outcome, err)
 	}
 	joined := strings.Join(*logs, "\n")
-	for _, want := range []string{"warning: could not read the published branch head", "not adopting anything this poll"} {
+	for _, want := range []string{"warning: could not read the published branch head", "no check result is read this poll"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("log is missing %q:\n%s", want, joined)
 		}
@@ -542,5 +541,43 @@ func TestCIStep_AdoptionWaitsWhenTheLiveBaseReadFails(t *testing.T) {
 	}
 	if run.HeadSHA != headSHA || run.PRBaseBranch != nil {
 		t.Fatalf("run = {head %s, base %v}, want both untouched", run.HeadSHA, run.PRBaseBranch)
+	}
+}
+
+// The ownership guard belongs to the poll, not to one PR-state branch. A
+// transient PR-state read failure used to skip it entirely - and the second
+// guard only sees a live head on GitHub, because no other provider writes it
+// back into the PR struct - so the foreign head's checks reached the findings
+// and the auto_fix.ci loop for commits the run never validated. With the guard
+// hoisted, a rewritten head is adopted and revalidated whatever the state read
+// did.
+func TestCIStep_AdoptsARewrittenHeadWhenThePRStateReadFails(t *testing.T) {
+	t.Parallel()
+	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+	rewritten := pushDescendantRewrite(t, dir)
+
+	env := append(revalidateEnv(t, `[{"name":"test","state":"FAILURE","bucket":"fail"}]`, "develop"),
+		"FAKE_CLI_STATE_ERR=the pull request state could not be read")
+	_, sctx, logs := revalidateContext(t, dir, upstream, baseSHA, headSHA, env)
+
+	outcome, err := (&steps.CIStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("adoption returned error: %v\nlog:\n%s", err, strings.Join(*logs, "\n"))
+	}
+	if outcome == nil || outcome.RestartFrom != types.StepReview {
+		t.Fatalf("outcome = %#v, want the rewritten head adopted and revalidated from Review", outcome)
+	}
+	if outcome.Findings != "" {
+		t.Fatalf("findings = %q, want no failing check reported for a head the run never validated", outcome.Findings)
+	}
+	if got := stepstest.GitCmd(t, dir, "rev-parse", "HEAD"); got != rewritten {
+		t.Fatalf("worktree head = %s, want the adopted %s", got, rewritten)
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.HeadSHA != rewritten {
+		t.Fatalf("durable run head = %s, want the adopted %s", run.HeadSHA, rewritten)
 	}
 }

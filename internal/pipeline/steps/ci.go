@@ -337,6 +337,31 @@ func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, ownHeads 
 	return proof.HeadSHA, nil
 }
 
+// guardPublishedHead refuses to let a poll read checks for a head this run
+// owns nowhere. It reports the outcome to return (an adoption restart or a
+// park), and whether this poll must stop short of the checks: a head the run
+// does not own is adopted, and a push-target read that fails says nothing about
+// ownership, so it warns and waits rather than reporting checks or failing the
+// run - the loop stays bounded by the CI timeout.
+func (s *CIStep) guardPublishedHead(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) (*pipeline.StepOutcome, bool, error) {
+	liveHead, err := publishedBranchHead(sctx)
+	if err != nil {
+		sctx.Log(fmt.Sprintf("warning: could not read the published branch head, so no check result is read this poll: %v", err))
+		return nil, true, nil
+	}
+	if s.ciRunOwnsHead(sctx, liveHead) {
+		return nil, false, nil
+	}
+	outcome, err := s.adoptPublishedHeadRewrite(sctx, host, pr, "the push target served head", liveHead)
+	if err != nil {
+		return nil, false, err
+	}
+	// A nil outcome means nothing was adopted because the fetched head turned
+	// out to be one the run owns; the checks still belong to the head the
+	// provider reported, so this poll reads none of them.
+	return outcome, outcome == nil, nil
+}
+
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutcome, err error) {
 	refusalFindings, err := parkedGateFindings(sctx)
 	if err != nil {
@@ -611,30 +636,27 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "open"); err != nil {
 				return nil, err
 			}
-			// Before any check result can establish readiness, look at the
-			// branch head the push target actually serves. A rewritten head
-			// this run owns nowhere is adopted and revalidated; an unreadable
-			// target keeps today's behavior for this poll: a warning, no
-			// trigger, and the next poll reads it again.
-			liveHead, headErr := publishedBranchHead(sctx)
-			if headErr != nil {
-				sctx.Log(fmt.Sprintf("warning: could not read the published branch head: %v", headErr))
-			} else if !s.ciRunOwnsHead(sctx, liveHead) {
-				outcome, adoptErr := s.adoptPublishedHeadRewrite(sctx, host, pr, "the push target served head", liveHead)
-				if adoptErr != nil {
-					return nil, adoptErr
-				}
-				if outcome != nil {
-					return outcome, nil
-				}
-				// The head the push target actually serves turned out to be
-				// one this run owns, so nothing was adopted: wait and read the
-				// branch again rather than reporting checks for this poll.
-				if err := waitForPoll(); err != nil {
-					return nil, err
-				}
-				continue
+		}
+
+		// Before any check result can establish readiness, look at the branch
+		// head the push target actually serves. This runs for every poll that
+		// reaches the checks, not just the one whose PR-state read said "open":
+		// the merged and closed arms have returned already, so the remaining
+		// cases are an open PR and a state read that failed - and a failed
+		// state read is no reason to report checks for a head nobody proved the
+		// run owns.
+		outcome, skipChecks, guardErr := s.guardPublishedHead(sctx, host, pr)
+		if guardErr != nil {
+			return nil, guardErr
+		}
+		if outcome != nil {
+			return outcome, nil
+		}
+		if skipChecks {
+			if err := waitForPoll(); err != nil {
+				return nil, err
 			}
+			continue
 		}
 
 		// Check mergeable state if the provider supports it
