@@ -122,13 +122,15 @@ func parkPublishedHeadRewrite(recorded, worktreeHead, liveHead, reason string) *
 // verified again just before the restart, a fetched head the run already owns
 // is not adopted at all (nil outcome: the caller keeps polling), the guard
 // refuses anything unattributable, the pull request's live base is resolved
-// while nothing has changed yet, recordLocalRepair advances the run head
-// durably and clears the review approval, that base is persisted, and the
-// outcome restarts the run at Review. Intent and
+// while nothing has changed yet, recordRevalidationHead advances the run head
+// durably and clears the review approval BEFORE the worktree moves (a durable
+// write that fails must leave the branch and worktree on the reviewed head,
+// since the worktree head is one of the heads the run is credited with owning),
+// that base is persisted, and the outcome restarts the run at Review. Intent and
 // Rebase are deliberately skipped (their content is base-relative and the
 // restart re-decides it), and the PR step will only refresh the body of the
 // existing pull request.
-func (s *CIStep) adoptPublishedHeadRewrite(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, observer, liveHead string) (*pipeline.StepOutcome, error) {
+func (s *CIStep) adoptPublishedHeadRewrite(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, observer, liveHead string) (outcome *pipeline.StepOutcome, readFailed bool, err error) {
 	recorded := strings.TrimSpace(sctx.Run.HeadSHA)
 	clearCIMonitorReady(sctx)
 	sctx.Log(fmt.Sprintf("pull request branch head moved outside the run (%s -> %s); adopting the live head and restarting at Review", shortSHA(recorded), shortSHA(liveHead)))
@@ -136,43 +138,43 @@ func (s *CIStep) adoptPublishedHeadRewrite(sctx *pipeline.StepContext, host scm.
 	target, err := fetchVerifiedPublishedHead(sctx)
 	if err != nil {
 		sctx.Log(fmt.Sprintf("warning: not adopting anything this poll: %v", err))
-		return nil, nil
+		return nil, true, nil
 	}
 	if s.ciRunOwnsHead(sctx, target) {
 		sctx.Log(fmt.Sprintf("warning: not adopting anything this poll: %s %s, but the push target serves %s, which this run owns - no check result for %s can be read, so the monitor keeps waiting for the two to agree", observer, shortSHA(liveHead), shortSHA(target), shortSHA(liveHead)))
-		return nil, nil
+		return nil, false, nil
 	}
 	worktreeHead, err := stepGitHeadSHA(sctx)
 	if err != nil {
 		sctx.Log(fmt.Sprintf("warning: not adopting %s this poll: the run worktree head could not be resolved: %v", shortSHA(target), err))
-		return nil, nil
+		return nil, false, nil
 	}
 	if reason := adoptableHeadRefusal(sctx, target); reason != "" {
 		sctx.Log(fmt.Sprintf("not adopting %s: %s", shortSHA(target), reason))
 		park := parkPublishedHeadRewrite(recorded, worktreeHead, target, reason)
-		return ciTerminalRepairOutcome(park, Findings{}, sctx.DeferredFindings), nil
+		return ciTerminalRepairOutcome(park, Findings{}, sctx.DeferredFindings), false, nil
 	}
 	liveBase, err := resolveLivePRBase(sctx, host, pr)
 	if errors.Is(err, errLivePRBaseUnread) {
 		sctx.Log(fmt.Sprintf("warning: not adopting %s this poll: %v", shortSHA(target), err))
-		return nil, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return nil, err
-	}
-	if _, err := stepGitRun(sctx, "reset", "--hard", target); err != nil {
-		return nil, fmt.Errorf("move the run worktree to the adopted head %s: %w", shortSHA(target), err)
+		return nil, false, err
 	}
 	if _, err := s.recordRevalidationHead(sctx, target, fmt.Sprintf("adopted rewritten pull request head %s (superseding %s); revalidation from Review required", shortSHA(target), shortSHA(recorded)), false); err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	if _, err := stepGitRun(sctx, "reset", "--hard", target); err != nil {
+		return nil, false, fmt.Errorf("move the run worktree to the adopted head %s: %w", shortSHA(target), err)
 	}
 	if err := applyRunPRBase(sctx, liveBase); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	return &pipeline.StepOutcome{
 		RestartFrom: types.StepReview,
 		Findings:    sctx.DeferredFindings,
-	}, nil
+	}, false, nil
 }
 
 // fetchVerifiedPublishedHead fetches the pull request branch from the push

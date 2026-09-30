@@ -544,14 +544,15 @@ func TestCIStep_AdoptionWaitsWhenTheLiveBaseReadFails(t *testing.T) {
 	}
 }
 
-// The ownership guard belongs to the poll, not to one PR-state branch. A
+// The ownership guard belongs to the poll, not to one PR-state branch: a
 // transient PR-state read failure used to skip it entirely - and the second
-// guard only sees a live head on GitHub, because no other provider writes it
-// back into the PR struct - so the foreign head's checks reached the findings
-// and the auto_fix.ci loop for commits the run never validated. With the guard
-// hoisted, a rewritten head is adopted and revalidated whatever the state read
-// did.
-func TestCIStep_AdoptsARewrittenHeadWhenThePRStateReadFails(t *testing.T) {
+// guard only sees a live head on GitHub - so the foreign head's checks reached
+// the findings and the auto_fix.ci loop for commits the run never validated.
+// The guard now runs whatever the state read did, but it only SKIPS there: the
+// merged and closed arms end a run, so adopting under an unreadable state would
+// reset the worktree and restart Review on a pull request that may already be
+// merged. The next poll with a readable state adopts.
+func TestCIStep_PRStateUnknownSkipsChecksWithoutAdopting(t *testing.T) {
 	t.Parallel()
 	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
 	rewritten := pushDescendantRewrite(t, dir)
@@ -560,24 +561,67 @@ func TestCIStep_AdoptsARewrittenHeadWhenThePRStateReadFails(t *testing.T) {
 		"FAKE_CLI_STATE_ERR=the pull request state could not be read")
 	_, sctx, logs := revalidateContext(t, dir, upstream, baseSHA, headSHA, env)
 
-	outcome, err := (&steps.CIStep{}).Execute(sctx)
-	if err != nil {
-		t.Fatalf("adoption returned error: %v\nlog:\n%s", err, strings.Join(*logs, "\n"))
+	polls := 0
+	step := (&steps.CIStep{}).SetWaitForNextPoll(func(ctx context.Context, interval time.Duration) error {
+		polls++
+		if polls >= 2 {
+			return errors.New("stop polling")
+		}
+		return nil
+	})
+	outcome, err := step.Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "stop polling") {
+		t.Fatalf("outcome = %#v, err = %v, want the monitor to have kept polling", outcome, err)
 	}
-	if outcome == nil || outcome.RestartFrom != types.StepReview {
-		t.Fatalf("outcome = %#v, want the rewritten head adopted and revalidated from Review", outcome)
+	joined := strings.Join(*logs, "\n")
+	if !strings.Contains(joined, "the pull request state could not be read") {
+		t.Fatalf("log does not name the unreadable state:\n%s", joined)
 	}
-	if outcome.Findings != "" {
-		t.Fatalf("findings = %q, want no failing check reported for a head the run never validated", outcome.Findings)
+	if strings.Contains(joined, "adopting the live head") {
+		t.Fatalf("the monitor adopted under an unreadable pull request state:\n%s", joined)
 	}
-	if got := stepstest.GitCmd(t, dir, "rev-parse", "HEAD"); got != rewritten {
-		t.Fatalf("worktree head = %s, want the adopted %s", got, rewritten)
+	if got := stepstest.GitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("worktree head = %s, want the reviewed %s (the rewrite %s must not be adopted yet)", got, headSHA, rewritten)
 	}
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.HeadSHA != rewritten {
-		t.Fatalf("durable run head = %s, want the adopted %s", run.HeadSHA, rewritten)
+	if run.HeadSHA != headSHA || run.PRBaseBranch != nil {
+		t.Fatalf("run = {head %s, base %v}, want both untouched", run.HeadSHA, run.PRBaseBranch)
+	}
+}
+
+// A push target whose head cannot be read leaves ownership unproven, so no
+// check is read - and without a bound that is an invisible spin: under an
+// unlimited ci_timeout it never ends, and under a finite one it parks on the
+// wrong condition. It follows the same rule the provider check read does: after
+// the same number of consecutive failures it parks with a finding naming the
+// unreadable push target.
+func TestCIStep_UnreadablePublishedHeadParksAfterTheReadLimit(t *testing.T) {
+	t.Parallel()
+	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+	stepstest.GitCmd(t, dir, "push", "origin", "--delete", "feature")
+
+	env := revalidateEnv(t, `[{"name":"test","state":"SUCCESS","bucket":"pass"}]`, "")
+	_, sctx, _ := revalidateContext(t, dir, upstream, baseSHA, headSHA, env)
+
+	step := (&steps.CIStep{}).SetWaitForNextPoll(func(ctx context.Context, interval time.Duration) error { return nil })
+	outcome, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatalf("CI step returned error: %v", err)
+	}
+	if outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("outcome = %#v, want an ask-user park once the read limit is hit", outcome)
+	}
+	var findings types.Findings
+	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+		t.Fatalf("decode findings: %v", err)
+	}
+	if len(findings.Items) != 1 || !strings.Contains(findings.Items[0].Description, "push target") {
+		t.Fatalf("findings = %+v, want one finding naming the unreadable push target", findings.Items)
+	}
+	if got := stepstest.GitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("worktree head moved to %s", got)
 	}
 }

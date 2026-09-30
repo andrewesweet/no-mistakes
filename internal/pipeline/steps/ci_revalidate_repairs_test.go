@@ -803,3 +803,33 @@ func TestApplyRunPRBase_AlignsTheBaseTheRestartScopesBy(t *testing.T) {
 		t.Fatalf("in-memory base = %q, want no write when the scoping base already agrees", *f.sctx.Run.PRBaseBranch)
 	}
 }
+
+// The durable record is what every later pass reads, and the run worktree's
+// head is one of the heads the run is credited with owning, so nothing may move
+// a ref before that record lands. Moving the branch first left the branch - and
+// therefore the worktree head - on a commit no Review approved while
+// runs.head_sha still named the reviewed one, and the next CI poll then counted
+// that foreign head as the run's own and could complete CI green on it.
+func TestRecordRevalidationHead_FailedDurableWriteMovesNoRef(t *testing.T) {
+	t.Parallel()
+
+	f := newCIRepairFixture(t, true, nil)
+	reviewed := f.headSHA
+	adopted := gitCmd(t, f.dir, "commit-tree", gitCmd(t, f.dir, "rev-parse", "HEAD^{tree}"), "-p", reviewed, "-m", "rewritten outside the run")
+	if err := f.sctx.DB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (&CIStep{}).recordRevalidationHead(f.sctx, adopted, "", false); err == nil {
+		t.Fatal("recordRevalidationHead() error = nil, want the durable write failure surfaced")
+	}
+	if got := gitCmd(t, f.dir, "rev-parse", "refs/heads/feature"); got != reviewed {
+		t.Fatalf("branch ref = %s, want the reviewed %s: the adopted head %s would then count as the run's own", got, reviewed, adopted)
+	}
+	if got := gitCmd(t, f.dir, "rev-parse", "HEAD"); got != reviewed {
+		t.Fatalf("worktree head = %s, want the reviewed %s", got, reviewed)
+	}
+	if f.sctx.Run.HeadSHA != reviewed {
+		t.Fatalf("in-memory run head = %s, want the reviewed %s", f.sctx.Run.HeadSHA, reviewed)
+	}
+}

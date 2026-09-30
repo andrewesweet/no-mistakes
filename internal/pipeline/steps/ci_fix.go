@@ -754,14 +754,16 @@ func (s *CIStep) recordLocalRepair(sctx *pipeline.StepContext, headSHA, note str
 // authorship label and the revert-to-minimal-fix ramp over the author's own work.
 func (s *CIStep) recordRevalidationHead(sctx *pipeline.StepContext, headSHA, note string, pipelineAuthored bool) (ciRepairResult, error) {
 	startingHead := sctx.Run.HeadSHA
-	if err := updateNonSharedBranchRef(sctx, headSHA); err != nil {
-		return ciRepairResult{}, err
-	}
-	// Durable first, then in memory. Advancing the live head before the write
+	// Durable first, then refs, then in memory. Moving a ref before the write
 	// succeeds leaves the monitor watching a head the durable record does not
 	// know about, still holding its old review approval, with the revalidation
-	// this call exists to trigger silently lost.
+	// this call exists to trigger silently lost - and for an adopted head it
+	// would leave the branch on a commit no Review approved while the record
+	// still names the reviewed one.
 	if err := sctx.DB.UpdateRunHeadSHAForRevalidation(sctx.Run.ID, headSHA); err != nil {
+		return ciRepairResult{}, err
+	}
+	if err := updateNonSharedBranchRef(sctx, headSHA); err != nil {
 		return ciRepairResult{}, err
 	}
 	sctx.Run.HeadSHA = headSHA

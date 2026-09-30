@@ -370,6 +370,26 @@ func ciCheckReadFailureOutcome(err error) *pipeline.StepOutcome {
 	}
 }
 
+// ciPublishedHeadReadFailureOutcome parks the CI step when the push target's
+// branch head stayed unreadable. Ownership of the live head cannot be proven
+// without it, so no check may be read; naming the push target is what separates
+// this park from the generic CI timeout it would otherwise spin into.
+func ciPublishedHeadReadFailureOutcome() *pipeline.StepOutcome {
+	findings := Findings{
+		Summary: "The pull request branch head could not be read from the push target",
+		Items: []Finding{{
+			Severity:    "warning",
+			Description: "the branch head could not be read from the push target on several consecutive polls, so no check result can be attributed to a head this run validated. Verify that the push target is reachable, that its credentials are current, and that the pull request branch still exists there.",
+			Action:      types.ActionAskUser,
+		}},
+	}
+	findingsJSON, _ := json.Marshal(findings)
+	return &pipeline.StepOutcome{
+		NeedsApproval: true,
+		Findings:      string(findingsJSON),
+	}
+}
+
 // ciFixAgentTimeoutOutcome parks the CI step for a decision after the auto-fix
 // agent burned its whole invocation budget without finishing.
 //
