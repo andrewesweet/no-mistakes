@@ -115,8 +115,9 @@ func parkPublishedHeadRewrite(recorded, worktreeHead, liveHead, reason string) *
 
 // adoptPublishedHeadRewrite moves the run onto the rewritten head the way a
 // CI repair revalidates: the live head is fetched from the push target and
-// verified again just before the restart, the guard refuses anything
-// unattributable, recordLocalRepair advances the run head durably and clears
+// verified again just before the restart, a fetched head the run already owns
+// is not adopted at all (nil outcome: the caller keeps polling), the guard
+// refuses anything unattributable, recordLocalRepair advances the run head durably and clears
 // the review approval, the persisted per-run base is aligned with the pull
 // request's live base, and the outcome restarts the run at Review. Intent and
 // Rebase are deliberately skipped (their content is base-relative and the
@@ -127,9 +128,13 @@ func (s *CIStep) adoptPublishedHeadRewrite(sctx *pipeline.StepContext, host scm.
 	clearCIMonitorReady(sctx)
 	sctx.Log(fmt.Sprintf("pull request branch head moved outside the run (%s -> %s); adopting the live head and restarting at Review", shortSHA(recorded), shortSHA(liveHead)))
 
-	target, err := fetchVerifiedPublishedHead(sctx, liveHead)
+	target, err := fetchVerifiedPublishedHead(sctx)
 	if err != nil {
 		return nil, err
+	}
+	if s.ciRunOwnsHead(sctx, target) {
+		sctx.Log(fmt.Sprintf("not adopting %s: the push target serves a head this run owns, so there is nothing to revalidate", shortSHA(target)))
+		return nil, nil
 	}
 	worktreeHead, err := stepGitHeadSHA(sctx)
 	if err != nil {
@@ -156,7 +161,7 @@ func (s *CIStep) adoptPublishedHeadRewrite(sctx *pipeline.StepContext, host scm.
 // FETCH_HEAD - no branch or worktree ref moves until the caller commits to
 // the adoption - and each attempt re-reads the live head first, so the
 // returned head is the branch's newest observable tip, not a stale one.
-func fetchVerifiedPublishedHead(sctx *pipeline.StepContext, liveHead string) (string, error) {
+func fetchVerifiedPublishedHead(sctx *pipeline.StepContext) (string, error) {
 	pushURL := resolvePushURL(sctx)
 	branch := strings.TrimPrefix(normalizedBranchRef(sctx.Run.Branch), "refs/heads/")
 	var lastErr error
@@ -204,7 +209,7 @@ func alignRunBaseWithLivePRBase(sctx *pipeline.StepContext, host scm.Host, pr *s
 	}
 	liveBase = strings.TrimSpace(liveBase)
 	if liveBase == "" {
-		return nil
+		return fmt.Errorf("the pull request reported no live base branch before restarting at Review")
 	}
 	current := runPRBaseBranch(sctx)
 	if current == liveBase {

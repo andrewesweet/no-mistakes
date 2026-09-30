@@ -531,7 +531,20 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			if headErr != nil {
 				sctx.Log(fmt.Sprintf("warning: could not read the published branch head: %v", headErr))
 			} else if !s.ciRunOwnsHead(sctx, liveHead) {
-				return s.adoptPublishedHeadRewrite(sctx, host, pr, liveHead)
+				outcome, adoptErr := s.adoptPublishedHeadRewrite(sctx, host, pr, liveHead)
+				if adoptErr != nil {
+					return nil, adoptErr
+				}
+				if outcome != nil {
+					return outcome, nil
+				}
+				// The head the push target actually serves turned out to be
+				// one this run owns, so nothing was adopted: wait and read the
+				// branch again rather than reporting checks for this poll.
+				if err := waitForPoll(); err != nil {
+					return nil, err
+				}
+				continue
 			}
 		}
 
@@ -581,7 +594,20 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			// never validated. The same adoption applies before any of those
 			// results can establish readiness.
 			if observed := strings.TrimSpace(pr.HeadSHA); observed != "" && !s.ciRunOwnsHead(sctx, observed) {
-				return s.adoptPublishedHeadRewrite(sctx, host, pr, observed)
+				outcome, adoptErr := s.adoptPublishedHeadRewrite(sctx, host, pr, observed)
+				if adoptErr != nil {
+					return nil, adoptErr
+				}
+				if outcome != nil {
+					return outcome, nil
+				}
+				// Nothing was adopted because the push target serves a head
+				// this run owns. These checks still belong to a head the run
+				// never validated, so none of them may be read: keep polling.
+				if err := waitForPoll(); err != nil {
+					return nil, err
+				}
+				continue
 			}
 			// A failure the provider produced before the repository's own steps
 			// ran (a setup/action-resolution outage) is infrastructure, not a

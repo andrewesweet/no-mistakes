@@ -138,6 +138,9 @@ func fakeGHHandler(args []string) {
 	fakeGHHandlePRContentCommands(args, strings.Join(args, " "))
 	prURL := os.Getenv("FAKE_CLI_PR_URL")
 	prBase := os.Getenv("FAKE_CLI_PR_BASE")
+	if prBase == "-" {
+		prBase = ""
+	}
 	prListJSON, hasPRListJSON := os.LookupEnv("FAKE_CLI_PR_LIST_JSON")
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		os.Exit(0)
@@ -449,7 +452,8 @@ func extractTrailingNumber(rawURL string) int {
 
 // fakeGHPRBaseBranch answers `gh pr view <n> --json baseRefName`, which the
 // CI step's restart-at-Review base alignment reads. FAKE_CLI_PR_BASE overrides
-// the default main.
+// the default main; the sentinel "-" reports no base at all, the way a forge
+// that will not name the pull request's base does.
 func fakeGHPRBaseBranch(joined string) {
 	if !strings.Contains(joined, "pr view") || !strings.Contains(joined, "--json baseRefName") {
 		return
@@ -457,6 +461,8 @@ func fakeGHPRBaseBranch(joined string) {
 	base := os.Getenv("FAKE_CLI_PR_BASE")
 	if base == "" {
 		base = "main"
+	} else if base == "-" {
+		base = ""
 	}
 	fmt.Println(base)
 	os.Exit(0)

@@ -264,3 +264,70 @@ func short(sha string) string {
 	}
 	return sha
 }
+
+// The provider's live head and the push target are two different reads. When
+// the provider names a foreign head but the push target still serves a head
+// this run owns, there is nothing to revalidate: the monitor adopts nothing,
+// restarts nothing, and keeps polling instead of cycling Review forever.
+func TestCIStep_ForeignProviderHeadWithAnOwnedPushTargetAdoptsNothing(t *testing.T) {
+	t.Parallel()
+	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+
+	tree := stepstest.GitCmd(t, dir, "rev-parse", "HEAD^{tree}")
+	ghost := stepstest.GitCmd(t, dir, "commit-tree", tree, "-m", "head only the provider reports")
+
+	env := append(revalidateEnv(t, `[{"name":"test","state":"SUCCESS","bucket":"pass"}]`, ""), "FAKE_CLI_PR_HEAD_SHA="+ghost)
+	_, sctx, logs := revalidateContext(t, dir, upstream, baseSHA, headSHA, env)
+
+	polls := 0
+	step := (&steps.CIStep{}).SetWaitForNextPoll(func(ctx context.Context, interval time.Duration) error {
+		polls++
+		if polls >= 2 {
+			return errors.New("stop polling")
+		}
+		return nil
+	})
+	outcome, err := step.Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "stop polling") {
+		t.Fatalf("outcome = %#v, err = %v, want the monitor to have kept polling", outcome, err)
+	}
+	if !strings.Contains(strings.Join(*logs, "\n"), "not adopting "+short(headSHA)) {
+		t.Fatalf("log is missing the owned-head refusal:\n%s", strings.Join(*logs, "\n"))
+	}
+	if got := stepstest.GitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("worktree head moved to %s", got)
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.HeadSHA != headSHA {
+		t.Fatalf("durable run head = %s, want it untouched", run.HeadSHA)
+	}
+	if run.ReviewApprovedHeadSHA != nil && *run.ReviewApprovedHeadSHA != headSHA {
+		t.Fatalf("review approval = %q, want it untouched", *run.ReviewApprovedHeadSHA)
+	}
+}
+
+// A pull request whose live base the forge will not name fails the step
+// closed: the restart at Review never happens against a stale recorded base.
+func TestCIStep_AdoptionFailsClosedWhenTheLiveBaseIsUnreported(t *testing.T) {
+	t.Parallel()
+	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+	pushDescendantRewrite(t, dir)
+
+	env := revalidateEnv(t, `[{"name":"test","state":"SUCCESS","bucket":"pass"}]`, "-")
+	_, sctx, _ := revalidateContext(t, dir, upstream, baseSHA, headSHA, env)
+
+	outcome, err := (&steps.CIStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "no live base branch") {
+		t.Fatalf("outcome = %#v, err = %v, want the base alignment to fail closed", outcome, err)
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PRBaseBranch != nil {
+		t.Fatalf("persisted base = %q, want no base recorded", *run.PRBaseBranch)
+	}
+}
