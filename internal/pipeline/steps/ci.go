@@ -143,7 +143,12 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 	case scm.PRStateMerged:
 		mergedHead, err := verifyMergedProof(sctx.Ctx, host, &scm.PR{Number: prNumber, URL: prURL}, s.ownValidatedHeads(sctx))
 		if err != nil {
-			return false, err
+			// A merge at a head the run owns nowhere is a deterministic
+			// refusal: every later tick reads the same merged proof, so a plain
+			// error would preserve the gate and retry forever. It is fatal here
+			// so the run ends with the same head-changed failure the poll loop
+			// produces. Transient reconciliation errors above stay parked.
+			return false, fmt.Errorf("%w: %w", pipeline.ErrFatalGateReconciliation, err)
 		}
 		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
 			return false, err

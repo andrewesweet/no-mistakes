@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -308,5 +310,35 @@ func TestCIStep_ReconcileApprovalGate_ClosedPRRecordsTheHeadRewriteOverride(t *t
 	}
 	if after.OverrideReason == nil || !strings.Contains(*after.OverrideReason, "owns nowhere") {
 		t.Fatalf("override reason = %v, want the head rewrite recorded as unresolved", after.OverrideReason)
+	}
+}
+
+// A pull request merged at a head the run owns nowhere is the same refusal the
+// poll loop produces, and it is deterministic: the proof reads the same on every
+// tick. Returned as a plain error it preserved the gate and retried forever, so
+// the run never reached a terminal outcome; it must fail the run fatally.
+func TestCIStep_ReconcileApprovalGate_MergedAtAForeignHeadFailsFatally(t *testing.T) {
+	t.Parallel()
+
+	sctx, _, foreign := headRewriteParkFixture(t, "MERGED")
+	// The forge reports the merge at the foreign head, which is in no owned set.
+	sctx.Env = append(sctx.Env, "FAKE_CLI_PR_HEAD_SHA="+foreign)
+
+	resolved, err := (&CIStep{}).ReconcileApprovalGate(sctx)
+	if resolved {
+		t.Fatalf("ReconcileApprovalGate() resolved = true, want the merge refused")
+	}
+	if !errors.Is(err, pipeline.ErrFatalGateReconciliation) {
+		t.Fatalf("error = %v, want a fatal reconciliation so the run ends rather than retrying forever", err)
+	}
+	if !errors.Is(err, scm.ErrHeadChanged) {
+		t.Fatalf("error = %v, want the pull-request-head-changed refusal preserved", err)
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PRState != nil && *run.PRState == "merged" {
+		t.Fatal("PR state recorded as merged for a head the run owns nowhere")
 	}
 }
