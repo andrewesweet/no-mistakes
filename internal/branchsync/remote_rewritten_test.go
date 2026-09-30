@@ -664,3 +664,44 @@ func TestUnreadableReboundMarkerLeavesAFastForwardPlanAlone(t *testing.T) {
 		t.Fatalf("BoundHeadUnvalidated = %q, want no claim either way", state.BoundHeadUnvalidated)
 	}
 }
+
+// The sync that moves the operator ONTO a head no run validated is the report
+// that most needs to say so. `axi sync --recover` rebinds the binding to the
+// rewritten live head; the local branch is then behind it, and the fast-forward
+// that follows must not report a plain "already synchronized" with no next
+// action - it leaves the branch sitting exactly on the unvalidated head.
+func TestSyncOntoAReboundUnvalidatedHeadKeepsSayingSo(t *testing.T) {
+	t.Parallel()
+
+	f, _ := newRemoteRewrittenFixture(t)
+	// A rewrite that replaces the pipeline's pushed commit but still descends
+	// from the operator's local head: the binding is rewritten, and the local
+	// branch is behind the new head, so the ordinary fast-forward applies.
+	writer := cloneRemoteBranch(t, f.remote)
+	mustRun(t, writer, "checkout", "-B", "rewrite-descendant", f.old)
+	mustWrite(t, filepath.Join(writer, "rewritten.txt"), "rewritten outside the pipeline\n")
+	mustRun(t, writer, "add", "rewritten.txt")
+	mustRun(t, writer, "commit", "-m", "rewritten outside the pipeline")
+	rewritten := mustRun(t, writer, "rev-parse", "HEAD")
+	mustRun(t, writer, "push", "--force", "origin", "HEAD:refs/heads/feature/sync")
+
+	if recovered := f.service.Recover(f.ctx, false); !recovered.Recovered {
+		t.Fatalf("recover = %#v", recovered)
+	}
+
+	plan := f.service.Refresh(f.ctx)
+	if plan.State != StateBehind || plan.BoundHeadUnvalidated != rewritten {
+		t.Fatalf("plan = %#v, want a behind branch that already names the unvalidated bound head %s", plan, rewritten)
+	}
+
+	state := f.service.Apply(f.ctx)
+	if state.Local.Head != rewritten {
+		t.Fatalf("local head = %s, want the fast-forward to have reached %s", state.Local.Head, rewritten)
+	}
+	if state.BoundHeadUnvalidated != rewritten {
+		t.Fatalf("BoundHeadUnvalidated = %q, want the post-sync report to keep naming %s", state.BoundHeadUnvalidated, rewritten)
+	}
+	if state.NextAction == nil || state.NextAction.Code != "validate_rebound_head" {
+		t.Fatalf("next action = %#v, want the validation run offered on a head no run validated", state.NextAction)
+	}
+}

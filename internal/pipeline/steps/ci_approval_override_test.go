@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -138,31 +139,64 @@ func TestCIStep_VerifyApprovalOverride_EmptyChecks(t *testing.T) {
 	}
 }
 
-// A human may approve the published-head-rewrite park - that is the verdict the
-// gate offers - but the checks being approved are the forge's for a head this
-// run validated nowhere, so the completion must be recorded as
-// passed-with-override however green they are. Before this, green checks for the
-// foreign head returned "" and the run completed reporting CI passed for a
-// commit Review and Test never saw.
-func TestCIStep_VerifyApprovalOverride_HeadRewriteParkIsNeverACleanPass(t *testing.T) {
-	t.Parallel()
+// headRewriteParkFixture is a run parked on a published head rewrite: the push
+// target serves a commit the run never validated, which is what the override
+// reason has to name. The remote is the source of that head for every
+// provider, so this fixture is provider-independent the way the park itself is.
+func headRewriteParkFixture(t *testing.T, prState string) (*pipeline.StepContext, string, string) {
+	t.Helper()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
 
 	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "validated")
+	validated := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	// The branch is rewritten outside the run, exactly as a native stack rebase
+	// does it: the push target now serves a commit the run never validated.
+	tree := gitCmd(t, dir, "rev-parse", "HEAD^{tree}")
+	foreign := gitCmd(t, dir, "commit-tree", tree, "-p", validated, "-m", "rewritten outside the run")
+	gitCmd(t, dir, "push", "--force", "origin", foreign+":refs/heads/feature")
+
 	prURL := "https://github.com/test/repo/pull/42"
-	const foreign = "1111111111111111111111111111111111111111"
-	sctx := newTestContextWithDBRecords(t, nil, dir, "base", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", config.Commands{})
-	sctx.Env = append(fakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`), "FAKE_CLI_PR_HEAD_SHA="+foreign)
+	sctx := newTestContextWithDBRecords(t, nil, dir, validated, validated, config.Commands{})
+	sctx.Env = append(fakeCIGH(t, prState, `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`), "FAKE_CLI_PR_HEAD_SHA="+validated)
 	sctx.Run.PRURL = &prURL
+	sctx.Run.Branch = "refs/heads/feature"
 
 	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sctx.StepResultID = stepResult.ID
-	park := parkPublishedHeadRewrite(sctx.Run.HeadSHA, sctx.Run.HeadSHA, foreign, "the run worktree holds commits that are neither on the live head nor recorded as published")
+	park := parkPublishedHeadRewrite(validated, validated, foreign, "the run worktree holds commits that are neither on the live head nor recorded as published")
 	if err := sctx.DB.SetStepFindings(stepResult.ID, park.Findings); err != nil {
 		t.Fatal(err)
 	}
+	return sctx, validated, foreign
+}
+
+// A human may approve the published-head-rewrite park - that is the verdict the
+// gate offers - but the checks being approved are the forge's for a head this
+// run validated nowhere, so the completion must be recorded as
+// passed-with-override however green they are. Before this, green checks for the
+// foreign head returned "" and the run completed reporting CI passed for a
+// commit Review and Test never saw. The reason names the head the PUSH TARGET
+// serves, which every provider reports the same way: reading it back out of the
+// PR struct the caller had just filled with the run's own head named that head
+// twice on every provider but GitHub.
+func TestCIStep_VerifyApprovalOverride_HeadRewriteParkIsNeverACleanPass(t *testing.T) {
+	t.Parallel()
+
+	sctx, validated, foreign := headRewriteParkFixture(t, "OPEN")
 
 	unresolved, err := (&CIStep{}).VerifyApprovalOverride(sctx)
 	if err != nil {
@@ -171,10 +205,33 @@ func TestCIStep_VerifyApprovalOverride_HeadRewriteParkIsNeverACleanPass(t *testi
 	if unresolved == "" {
 		t.Fatal("unresolved = \"\", want the head rewrite recorded as an unresolved condition despite the green checks")
 	}
-	for _, want := range []string{shortSHA(sctx.Run.HeadSHA), shortSHA(foreign)} {
-		if !strings.Contains(unresolved, want) {
-			t.Fatalf("unresolved = %q, want it to name %q", unresolved, want)
-		}
+	if !strings.Contains(unresolved, shortSHA(validated)) || !strings.Contains(unresolved, shortSHA(foreign)) {
+		t.Fatalf("unresolved = %q, want it to name the validated head %s and the published head %s", unresolved, shortSHA(validated), shortSHA(foreign))
+	}
+	if strings.Count(unresolved, shortSHA(validated)) != 1 {
+		t.Fatalf("unresolved = %q, names the run's own head where the published head belongs", unresolved)
+	}
+}
+
+// A pull request merged while the gate sat parked on a head rewrite resolves it
+// too, and on a provider without merged-proof nothing else checks the head, so
+// that completion carries the same override record rather than reading as an
+// ordinary pass.
+func TestCIStep_ReconcileApprovalGate_MergedPRRecordsTheHeadRewriteOverride(t *testing.T) {
+	t.Parallel()
+
+	sctx, validated, _ := headRewriteParkFixture(t, "MERGED")
+
+	resolved, err := (&CIStep{}).ReconcileApprovalGate(sctx)
+	if err != nil || !resolved {
+		t.Fatalf("ReconcileApprovalGate() = (%v, %v), want the merged PR to resolve the gate", resolved, err)
+	}
+	after, err := sctx.DB.GetStepResult(sctx.StepResultID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.OverrideReason == nil || !strings.Contains(*after.OverrideReason, shortSHA(validated)) {
+		t.Fatalf("override reason = %v, want the head rewrite recorded as unresolved", after.OverrideReason)
 	}
 }
 

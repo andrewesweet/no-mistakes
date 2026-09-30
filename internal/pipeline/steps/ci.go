@@ -147,6 +147,9 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
 			return false, err
 		}
+		if err := recordHeadRewriteOverride(sctx, ""); err != nil {
+			return false, err
+		}
 		notifyPRMerged(sctx)
 		if sctx.Log != nil {
 			sctx.Log("PR has been merged; clearing stale CI approval gate")
@@ -215,18 +218,16 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 	if err != nil {
 		return fmt.Sprintf("could not read the parked CI gate findings: %v", err), nil
 	}
-	pr := &scm.PR{Number: prNumber, URL: prURL}
 	if pipeline.HasCIHeadRewriteRefusal(parked) {
-		// Naming the head the forge carries is the point of this reason, and a
-		// non-empty head is what makes the provider resolve and report it.
-		pr.HeadSHA = strings.TrimSpace(sctx.Run.HeadSHA)
+		liveHead, headErr := publishedBranchHead(sctx)
+		if headErr != nil {
+			liveHead = ""
+		}
+		return headRewriteOverrideReason(sctx, parked, liveHead), nil
 	}
-	checks, checksErr := host.GetChecks(ctx, pr)
-	if reason := headRewriteOverrideReason(sctx, parked, pr.HeadSHA); reason != "" {
-		return reason, nil
-	}
-	if checksErr != nil {
-		return fmt.Sprintf("could not verify live CI state: %v", checksErr), nil
+	checks, err := host.GetChecks(ctx, &scm.PR{Number: prNumber, URL: prURL})
+	if err != nil {
+		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
 	if allChecksPassed(checks) {
 		return "", nil

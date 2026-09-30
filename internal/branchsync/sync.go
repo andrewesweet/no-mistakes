@@ -523,7 +523,7 @@ func (s *Service) Apply(ctx context.Context) State {
 	plan.State = StateSynchronized
 	plan.Relation = RelationEqual
 	plan.Safety = "already_synchronized"
-	plan.NextAction = nil
+	plan.NextAction = reboundNextAction(&plan)
 	plan.Error = ""
 	return plan
 }
@@ -1868,21 +1868,19 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 }
 
 func (s *Service) classifyRelation(ctx context.Context, state *State, pushed, base string, live bool) {
+	readable := s.annotateUnvalidatedRebound(state, pushed)
 	if state.Local.Head == pushed {
-		if !s.annotateUnvalidatedRebound(state, pushed) {
+		if !readable {
+			state.State = StateAmbiguousContext
+			state.Safety = "blocked_rebound_marker_unreadable"
+			state.Error = "whether any run validated the push-bound head could not be read; no files or refs were changed"
+			state.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --check"}
 			return
 		}
 		state.State = StateSynchronized
 		state.Relation = RelationEqual
 		state.Safety = "already_synchronized"
-		state.NextAction = nil
-		if state.BoundHeadUnvalidated != "" {
-			// The branch equals a head no run validated: the next action is to
-			// start a validation run on it, not to call it synchronized. An
-			// up-to-date push from that run falls back to a rerun that keeps
-			// the pull request, so the instruction is safe to follow.
-			state.NextAction = &NextAction{Code: "validate_rebound_head", Command: `no-mistakes axi run --intent "<what the user set out to accomplish>"`}
-		}
+		state.NextAction = reboundNextAction(state)
 		return
 	}
 	if objectExists(ctx, s.workDir(), pushed) {
@@ -1945,31 +1943,38 @@ func syncAnchorRef(runID string) string {
 // later publication of the exact head by any run clears it, so a stale marker
 // can never name a head the pipeline has since validated. States that never
 // reach the ordinary relation classification (merged, closed, ambiguous
-// context) keep their own reasons and carry no statement either way. A read
-// that fails says nothing either way, so it blocks the classification instead
-// of letting the branch be reported as plainly synchronized: the marker is the
-// only statement this component exists to make. It is read only in the branch
-// that consumes it - the local head equals the push binding - because the
-// marker says nothing about a behind, local-ahead or diverged branch, and
-// blocking those turned an ordinary fast-forward plan, and a rebind that DID
-// apply, into a refusal over state with no bearing on either.
+// context) keep their own reasons and carry no statement either way. EVERY
+// relation carries the statement, because the branch a report calls behind
+// today is the branch a fast-forward puts exactly on that unvalidated head,
+// and reporting it as plainly synchronized afterwards is the one report that
+// most needs it. It reports whether the read succeeded rather than acting on a
+// failure itself: only the equal relation consumes the marker for its verdict,
+// so only that relation blocks on an unreadable one - blocking the others
+// turned an ordinary fast-forward plan, and a rebind that DID apply, into a
+// refusal over state with no bearing on either.
 func (s *Service) annotateUnvalidatedRebound(state *State, pushed string) bool {
 	if state == nil || pushed == "" || state.Target.Ref == "" {
 		return true
 	}
 	bound, ok, err := s.DB.GetUnvalidatedReboundHead(s.Repo.ID, state.Target.Ref)
 	if err != nil {
-		state.State = StateAmbiguousContext
-		state.Safety = "blocked_rebound_marker_unreadable"
-		state.Error = "whether any run validated the push-bound head could not be read; no files or refs were changed"
-		state.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --check"}
 		return false
 	}
-	if !ok || bound != pushed {
-		return true
+	if ok && bound == pushed {
+		state.BoundHeadUnvalidated = bound
 	}
-	state.BoundHeadUnvalidated = bound
 	return true
+}
+
+// reboundNextAction is what a branch sitting exactly on a head no run
+// validated should do next: start a validation run on it, rather than be told
+// it is synchronized. An up-to-date push from that run falls back to a rerun
+// that keeps the pull request, so the instruction is safe to follow.
+func reboundNextAction(state *State) *NextAction {
+	if state == nil || state.BoundHeadUnvalidated == "" {
+		return nil
+	}
+	return &NextAction{Code: "validate_rebound_head", Command: `no-mistakes axi run --intent "<what the user set out to accomplish>"`}
 }
 
 func equivalentDivergence(ctx context.Context, dir, local, pushed, base string) bool {
