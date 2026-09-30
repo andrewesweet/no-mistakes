@@ -116,6 +116,13 @@ const (
 // selected. The automatic resolvers key on the category, not on this ID.
 const FindingIDCIHeadRewrite = "ci-head-rewrite-refusal"
 
+// FindingIDCIUnownedHeadStall is the fixed ID of the park the CI monitor raises
+// when consecutive polls all ended without a check for a head the run owns. It
+// carries FindingCategoryCIHeadRewrite for the same reason that park does: the
+// decision is which head to validate, and no verdict an automatic resolver can
+// send settles it.
+const FindingIDCIUnownedHeadStall = "ci-unowned-head-stall"
+
 // HasCIHeadRewrite reports whether findings carry the CI monitor's
 // published-head-rewrite park. Keyed on the category, the same way
 // HasReviewQuestion is, because the park is what makes the head decision an

@@ -672,6 +672,17 @@ func TestCIStep_PollsThatReadNoOwnedCheckAreBounded(t *testing.T) {
 			if len(findings.Items) != 1 || !strings.Contains(findings.Items[0].Description, "a head this run validated") {
 				t.Fatalf("findings = %+v, want one finding naming the unread condition", findings.Items)
 			}
+			// The decision this park asks for is which head to validate, so
+			// the one predicate both automatic resolvers read must cover it:
+			// without the category `axi --yes` and the TUI's yolo approved it,
+			// and the approval then completed CI as a plain pass on a head no
+			// Review certified.
+			if !pipeline.HasCIHeadRewriteRefusal(outcome.Findings) {
+				t.Fatalf("findings = %+v, want the head-rewrite category every automatic resolver stands aside on", findings.Items)
+			}
+			if findings.Items[0].ID == "" {
+				t.Fatalf("findings = %+v, want a stable finding ID an operator can select", findings.Items)
+			}
 			if got := stepstest.GitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
 				t.Fatalf("worktree head moved to %s", got)
 			}

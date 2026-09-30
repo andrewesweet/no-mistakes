@@ -342,3 +342,27 @@ func TestCIStep_ReconcileApprovalGate_MergedAtAForeignHeadFailsFatally(t *testin
 		t.Fatal("PR state recorded as merged for a head the run owns nowhere")
 	}
 }
+
+// A human may approve the unowned-head stall park, and that approval must carry
+// the same unresolved-condition record the rewrite park's does: the checks it
+// would otherwise pass are the forge's for a head this run validated nowhere.
+func TestCIStep_VerifyApprovalOverride_UnownedHeadStallIsNeverACleanPass(t *testing.T) {
+	t.Parallel()
+
+	sctx, validated, foreign := headRewriteParkFixture(t, "OPEN")
+	stall := ciUnownedHeadStallOutcome()
+	if err := sctx.DB.SetStepFindings(sctx.StepResultID, stall.Findings); err != nil {
+		t.Fatal(err)
+	}
+
+	unresolved, err := (&CIStep{}).VerifyApprovalOverride(sctx)
+	if err != nil {
+		t.Fatalf("VerifyApprovalOverride() error = %v", err)
+	}
+	if unresolved == "" {
+		t.Fatal("unresolved = \"\", want the stall recorded as an unresolved condition despite the green checks")
+	}
+	if !strings.Contains(unresolved, shortSHA(validated)) || !strings.Contains(unresolved, shortSHA(foreign)) {
+		t.Fatalf("unresolved = %q, want it to name the validated head %s and the published head %s", unresolved, shortSHA(validated), shortSHA(foreign))
+	}
+}
