@@ -570,8 +570,19 @@ type PushRebind struct {
 // reports whether it applied. head_sha follows only
 // when it equalled the old binding, so a custody-returned run keeps its own
 // recorded head.
+//
+// The rebind is the only writer of the unvalidated-rebound-head marker, and it
+// writes it in this same transaction: recording it afterwards could not be
+// retried, because the retry would find the binding already at the live head
+// and return early, leaving a bound head no run validated with nothing saying
+// so.
 func (d *DB) RebindRunPushedHead(id string, rebind PushRebind) (bool, error) {
-	result, err := d.sql.Exec(
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return false, fmt.Errorf("rebind run pushed head: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(
 		`UPDATE runs SET head_sha = CASE WHEN head_sha = last_pushed_sha THEN ? ELSE head_sha END, last_pushed_sha = ?, push_generation = COALESCE(push_generation, 0) + 1, updated_at = ?
 		WHERE id = ? AND status = ? AND last_pushed_sha = ? AND COALESCE(push_generation, 0) = ?
 			AND head_sha = ? AND (custody_returned_at IS NOT NULL) = ?
@@ -593,7 +604,20 @@ func (d *DB) RebindRunPushedHead(id string, rebind PushRebind) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("rebind run pushed head: %w", err)
 	}
-	return affected == 1, nil
+	if affected != 1 {
+		return false, nil
+	}
+	var repoID string
+	if err := tx.QueryRow(`SELECT repo_id FROM runs WHERE id = ?`, id).Scan(&repoID); err != nil {
+		return false, fmt.Errorf("rebind run pushed head: %w", err)
+	}
+	if err := recordUnvalidatedReboundHead(tx, repoID, rebind.Ref, rebind.Head); err != nil {
+		return false, fmt.Errorf("rebind run pushed head: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("rebind run pushed head: commit: %w", err)
+	}
+	return true, nil
 }
 
 // SetRunCustodyReturned stamps the moment a guarded recovery explicitly

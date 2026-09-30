@@ -2,6 +2,7 @@ package branchsync
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -588,5 +589,39 @@ func TestStaleMarkerForADifferentHeadAnnotatesNothing(t *testing.T) {
 	}
 	if state.NextAction == nil || state.NextAction.Code != "recover_remote_rewritten" {
 		t.Fatalf("next action = %#v, want the ordinary recovery offer", state.NextAction)
+	}
+}
+
+// Whether the push-bound head was validated is the only statement this marker
+// exists to make, so a read that fails must block the report rather than let
+// the branch be called plainly synchronized.
+func TestUnreadableReboundMarkerBlocksInsteadOfReportingSynchronized(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+	mustRun(t, f.local, "fetch", f.remote, "feature/sync")
+	mustRun(t, f.local, "reset", "--hard", "FETCH_HEAD")
+	if state := f.service.Refresh(f.ctx); state.State != StateSynchronized || state.Safety != "already_synchronized" {
+		t.Fatalf("state = %#v, want the ordinary synchronized report before the marker becomes unreadable", state)
+	}
+
+	raw, err := sql.Open("sqlite", filepath.Join(filepath.Dir(f.local), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`DROP TABLE unvalidated_rebound_heads`); err != nil {
+		t.Fatal(err)
+	}
+
+	state := f.service.Refresh(f.ctx)
+	if state.Safety != "blocked_rebound_marker_unreadable" || state.State != StateAmbiguousContext {
+		t.Fatalf("state = %#v, want the unreadable marker to block the report", state)
+	}
+	if state.BoundHeadUnvalidated != "" {
+		t.Fatalf("BoundHeadUnvalidated = %q, want no claim either way", state.BoundHeadUnvalidated)
+	}
+	if state.NextAction == nil || state.NextAction.Code != "retry" {
+		t.Fatalf("next action = %#v, want a retry", state.NextAction)
 	}
 }

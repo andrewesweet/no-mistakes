@@ -613,3 +613,42 @@ func TestCIStep_MonitorRestartsAtReviewForAHeldRepair(t *testing.T) {
 		t.Errorf("CI step did not report its repair policy; log:\n%s", f.log())
 	}
 }
+
+// The pull request's live base is only an input to a restart at Review. A
+// repair that publishes and keeps monitoring never needs it, so a forge that
+// cannot report it must not cost the run its repair; a repair that restarts
+// still fails closed on the same read.
+func TestCIStep_UnreadableLiveBaseOnlyStopsTheRestartingRepair(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		revalidate bool
+	}{
+		{name: "published_repair_survives_it", revalidate: false},
+		{name: "restarting_repair_fails_closed", revalidate: true},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCIRepairFixture(t, tc.revalidate, writeCIFix)
+			f.sctx.Env = append(f.sctx.Env, "FAKE_CLI_PR_BASE=!")
+
+			outcome, err := f.run(t)
+			if tc.revalidate {
+				if err == nil || !strings.Contains(err.Error(), "read the pull request's live base branch") {
+					t.Fatalf("outcome = %#v, err = %v, want the restart to fail closed\nlog:\n%s", outcome, err, f.log())
+				}
+				return
+			}
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Fatalf("CI step returned error: %v\nlog:\n%s", err, f.log())
+			}
+			if f.remoteHead(t) == f.headSHA {
+				t.Fatalf("the repair was never published; log:\n%s", f.log())
+			}
+			if !strings.Contains(f.log(), "committed and pushed CI repair") {
+				t.Errorf("log missing the published repair:\n%s", f.log())
+			}
+		})
+	}
+}

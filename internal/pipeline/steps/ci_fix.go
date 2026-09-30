@@ -97,10 +97,7 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 	previousHeadSHA := sctx.Run.HeadSHA
 	fixKey := encodeLastFixedChecks(targets.Checks, targets.MergeConflict)
 	fixCompletedAt := completionTimesForTargets(s.observedCompletedAt, targets.Checks)
-	liveBase, err := resolveLivePRBase(sctx, host, pr)
-	if err != nil {
-		return nil, err
-	}
+	liveBase, baseErr := resolveLivePRBase(sctx, host, pr)
 	repair, err := s.autoFixCI(sctx, host, pr, targets)
 	if outcome := pipeline.ProtectedPathOutcome(err); outcome != nil {
 		return ciTerminalRepairOutcome(outcome, targets.Findings, sctx.DeferredFindings), nil
@@ -132,7 +129,11 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 			// Before any restart at Review, the run's persisted per-run base is
 			// aligned with the pull request's live forge base, so a retargeted
 			// layer keeps its layer-only scope. The base was resolved before
-			// the repair mutated anything (see resolveLivePRBase).
+			// the repair mutated anything (see resolveLivePRBase), and only a
+			// restart needs it: a publishable repair owes the forge nothing.
+			if baseErr != nil {
+				return nil, baseErr
+			}
 			if err := applyRunPRBase(sctx, liveBase); err != nil {
 				return nil, err
 			}

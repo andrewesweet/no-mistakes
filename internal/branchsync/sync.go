@@ -1405,16 +1405,10 @@ func (s *Service) recoverRemoteRewritten(ctx context.Context, run *db.Run, keepL
 		Source: "remote_rewritten", RepositoryID: s.Repo.ID, RunID: run.ID, Branch: fresh.Local.Branch,
 		RequiredHead: live, PreservedHead: superseded, ArchiveRef: anchorRef, Proof: anchoredIn,
 	}
-	// The rebind is the only writer of the unvalidated-bound-head marker, and
-	// the recovery result must state that no run validated the head it just
-	// bound. Failing to record it refuses the recovery (fail closed) rather
-	// than reporting a head as usable while the reports would stay silent
-	// about its provenance.
-	if err := s.DB.RecordUnvalidatedReboundHead(s.Repo.ID, fresh.Target.Ref, live); err != nil {
-		return blockedPlan(state, state.State, "blocked_recover_marker_failed", fmt.Sprintf("the push binding was rebound to %s, but recording that no run validated it failed, so recovery is not reported; the superseded pipeline head stays anchored at %s", live, anchorRef)), true
-	}
-	// The inspection above ran before the marker existed, so the recovery
-	// result carries the statement directly; every later report re-reads it.
+	// RebindRunPushedHead wrote the unvalidated-bound-head marker in the same
+	// transaction as the binding, so a rebind that applied always has one. The
+	// inspection above ran against the pre-rebind state, so the recovery result
+	// carries the statement directly; every later report re-reads it.
 	state.BoundHeadUnvalidated = live
 	note := fmt.Sprintf("the superseded pipeline head was anchored at %s; the branch, worktree, and remote were not changed", anchorRef)
 	if state.Error != "" {
@@ -1869,7 +1863,9 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 }
 
 func (s *Service) classifyRelation(ctx context.Context, state *State, pushed, base string, live bool) {
-	s.annotateUnvalidatedRebound(state, pushed)
+	if !s.annotateUnvalidatedRebound(state, pushed) {
+		return
+	}
 	if state.Local.Head == pushed {
 		state.State = StateSynchronized
 		state.Relation = RelationEqual
@@ -1944,16 +1940,27 @@ func syncAnchorRef(runID string) string {
 // later publication of the exact head by any run clears it, so a stale marker
 // can never name a head the pipeline has since validated. States that never
 // reach the ordinary relation classification (merged, closed, ambiguous
-// context) keep their own reasons and carry no statement either way.
-func (s *Service) annotateUnvalidatedRebound(state *State, pushed string) {
+// context) keep their own reasons and carry no statement either way. A read
+// that fails says nothing either way, so it blocks the classification instead
+// of letting the branch be reported as plainly synchronized: the marker is the
+// only statement this component exists to make.
+func (s *Service) annotateUnvalidatedRebound(state *State, pushed string) bool {
 	if state == nil || pushed == "" || state.Target.Ref == "" {
-		return
+		return true
 	}
 	bound, ok, err := s.DB.GetUnvalidatedReboundHead(s.Repo.ID, state.Target.Ref)
-	if err != nil || !ok || bound != pushed {
-		return
+	if err != nil {
+		state.State = StateAmbiguousContext
+		state.Safety = "blocked_rebound_marker_unreadable"
+		state.Error = "whether any run validated the push-bound head could not be read; no files or refs were changed"
+		state.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --check"}
+		return false
+	}
+	if !ok || bound != pushed {
+		return true
 	}
 	state.BoundHeadUnvalidated = bound
+	return true
 }
 
 func equivalentDivergence(ctx context.Context, dir, local, pushed, base string) bool {

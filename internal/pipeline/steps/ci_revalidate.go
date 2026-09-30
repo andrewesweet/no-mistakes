@@ -134,7 +134,7 @@ func (s *CIStep) adoptPublishedHeadRewrite(sctx *pipeline.StepContext, host scm.
 		return nil, err
 	}
 	if s.ciRunOwnsHead(sctx, target) {
-		sctx.Log(fmt.Sprintf("not adopting %s: the push target serves a head this run owns, so there is nothing to revalidate", shortSHA(target)))
+		sctx.Log(fmt.Sprintf("warning: not adopting anything this poll: the pull request reports head %s, but the push target serves %s, which this run owns - no check result for %s can be read, so the monitor keeps waiting for the two to agree", shortSHA(liveHead), shortSHA(target), shortSHA(liveHead)))
 		return nil, nil
 	}
 	worktreeHead, err := stepGitHeadSHA(sctx)

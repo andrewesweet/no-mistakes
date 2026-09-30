@@ -6,6 +6,12 @@ import (
 	"fmt"
 )
 
+// reboundHeadExecer is whatever can run the marker write: the connection for
+// the standalone call, or the rebind's own transaction.
+type reboundHeadExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
 // RecordUnvalidatedReboundHead durably marks ref's rebound head as one no run
 // has validated. Only the rewritten-remote recovery's compare-and-swap writes
 // this state, so the row exists exactly while the branch's push binding names
@@ -13,10 +19,14 @@ import (
 // by any run clears it (ClearUnvalidatedReboundHeadOnPublication); rebinding
 // the same ref again replaces the row.
 func (d *DB) RecordUnvalidatedReboundHead(repoID, ref, head string) error {
+	return recordUnvalidatedReboundHead(d.sql, repoID, ref, head)
+}
+
+func recordUnvalidatedReboundHead(ex reboundHeadExecer, repoID, ref, head string) error {
 	if repoID == "" || ref == "" || head == "" {
 		return errors.New("record unvalidated rebound head: repo, ref, and head are required")
 	}
-	_, err := d.sql.Exec(
+	_, err := ex.Exec(
 		`INSERT INTO unvalidated_rebound_heads (repo_id, ref, head_sha, created_at) VALUES (?, ?, ?, ?)
 		ON CONFLICT(repo_id, ref) DO UPDATE SET head_sha = excluded.head_sha, created_at = excluded.created_at`,
 		repoID, ref, head, now(),

@@ -1,6 +1,10 @@
 package db
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
+)
 
 // The unvalidated rebound head is the rewritten-remote recovery's durable
 // statement that the branch's push binding names a head no run validated.
@@ -82,5 +86,47 @@ func TestUnvalidatedReboundHeadRequiresRepoRefAndHead(t *testing.T) {
 	}
 	if err := d.RecordUnvalidatedReboundHead("repo-1", "refs/heads/feature", ""); err == nil {
 		t.Fatal("empty head must be refused")
+	}
+}
+
+// The rebind and its marker are one transaction: a rebind that applied always
+// left the marker behind, and a refused rebind never writes one. Recording it
+// after the rebind could not be retried - the retry finds the binding already
+// at the live head and returns early - so the marker would be lost for good.
+func TestRebindRunPushedHeadWritesTheMarkerWithTheBinding(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/tmp/repo-rebind-marker", "https://example.com/repo.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "submitted", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunPublication(run.ID, PushBinding{HeadSHA: "pushed", TargetKind: "upstream", TargetFingerprint: "digest", Ref: "refs/heads/feature"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+	prState := "none"
+	verified := PushRebind{
+		Status: types.RunCompleted, ExpectedPushed: "pushed", ExpectedGeneration: 1, ExpectedHead: "pushed",
+		PRState: &prState, UpstreamURL: "https://example.com/repo.git", TargetKind: "upstream",
+		TargetFingerprint: "digest", Ref: "refs/heads/feature", Head: "live",
+	}
+
+	refused := verified
+	refused.ExpectedGeneration = 7
+	if applied, err := d.RebindRunPushedHead(run.ID, refused); err != nil || applied {
+		t.Fatalf("refused rebind: applied = %v, err = %v", applied, err)
+	}
+	if head, ok, err := d.GetUnvalidatedReboundHead(repo.ID, "refs/heads/feature"); err != nil || ok {
+		t.Fatalf("marker after a refused rebind = (%q, %v, %v), want none", head, ok, err)
+	}
+
+	if applied, err := d.RebindRunPushedHead(run.ID, verified); err != nil || !applied {
+		t.Fatalf("verified rebind: applied = %v, err = %v", applied, err)
+	}
+	head, ok, err := d.GetUnvalidatedReboundHead(repo.ID, "refs/heads/feature")
+	if err != nil || !ok || head != "live" {
+		t.Fatalf("marker after the rebind = (%q, %v, %v), want live", head, ok, err)
 	}
 }

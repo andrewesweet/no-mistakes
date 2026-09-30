@@ -291,8 +291,13 @@ func TestCIStep_ForeignProviderHeadWithAnOwnedPushTargetAdoptsNothing(t *testing
 	if err == nil || !strings.Contains(err.Error(), "stop polling") {
 		t.Fatalf("outcome = %#v, err = %v, want the monitor to have kept polling", outcome, err)
 	}
-	if !strings.Contains(strings.Join(*logs, "\n"), "not adopting "+short(headSHA)) {
-		t.Fatalf("log is missing the owned-head refusal:\n%s", strings.Join(*logs, "\n"))
+	// The stall is what eventually parks on the generic CI timeout, so each
+	// non-adopting poll has to name both heads to be diagnosable.
+	joined := strings.Join(*logs, "\n")
+	for _, want := range []string{"not adopting anything this poll", "reports head " + short(ghost), "push target serves " + short(headSHA)} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("log is missing %q:\n%s", want, joined)
+		}
 	}
 	if got := stepstest.GitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
 		t.Fatalf("worktree head moved to %s", got)
