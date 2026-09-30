@@ -1428,6 +1428,11 @@ func reboundStateUsable(state State) bool {
 	switch state.State {
 	case StateSynchronized, StateBehind, StateLocalAhead, StateDiverged:
 		return true
+	case StateAmbiguousContext:
+		// The rebind wrote the marker in its own transaction and the recovery
+		// result names the bound head itself, so a marker read that failed says
+		// nothing about who owns the branch.
+		return state.Safety == "blocked_rebound_marker_unreadable"
 	default:
 		return false
 	}
@@ -1863,10 +1868,10 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 }
 
 func (s *Service) classifyRelation(ctx context.Context, state *State, pushed, base string, live bool) {
-	if !s.annotateUnvalidatedRebound(state, pushed) {
-		return
-	}
 	if state.Local.Head == pushed {
+		if !s.annotateUnvalidatedRebound(state, pushed) {
+			return
+		}
 		state.State = StateSynchronized
 		state.Relation = RelationEqual
 		state.Safety = "already_synchronized"
@@ -1943,7 +1948,11 @@ func syncAnchorRef(runID string) string {
 // context) keep their own reasons and carry no statement either way. A read
 // that fails says nothing either way, so it blocks the classification instead
 // of letting the branch be reported as plainly synchronized: the marker is the
-// only statement this component exists to make.
+// only statement this component exists to make. It is read only in the branch
+// that consumes it - the local head equals the push binding - because the
+// marker says nothing about a behind, local-ahead or diverged branch, and
+// blocking those turned an ordinary fast-forward plan, and a rebind that DID
+// apply, into a refusal over state with no bearing on either.
 func (s *Service) annotateUnvalidatedRebound(state *State, pushed string) bool {
 	if state == nil || pushed == "" || state.Target.Ref == "" {
 		return true

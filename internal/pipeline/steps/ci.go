@@ -156,6 +156,9 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "closed"); err != nil {
 			return false, err
 		}
+		if err := recordHeadRewriteOverride(sctx, ""); err != nil {
+			return false, err
+		}
 		if sctx.Log != nil {
 			sctx.Log("PR has been closed; clearing stale CI approval gate")
 		}
@@ -208,9 +211,22 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 	if err != nil {
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
-	checks, err := host.GetChecks(ctx, &scm.PR{Number: prNumber, URL: prURL})
+	parked, err := parkedGateFindings(sctx)
 	if err != nil {
-		return fmt.Sprintf("could not verify live CI state: %v", err), nil
+		return fmt.Sprintf("could not read the parked CI gate findings: %v", err), nil
+	}
+	pr := &scm.PR{Number: prNumber, URL: prURL}
+	if pipeline.HasCIHeadRewriteRefusal(parked) {
+		// Naming the head the forge carries is the point of this reason, and a
+		// non-empty head is what makes the provider resolve and report it.
+		pr.HeadSHA = strings.TrimSpace(sctx.Run.HeadSHA)
+	}
+	checks, checksErr := host.GetChecks(ctx, pr)
+	if reason := headRewriteOverrideReason(sctx, parked, pr.HeadSHA); reason != "" {
+		return reason, nil
+	}
+	if checksErr != nil {
+		return fmt.Sprintf("could not verify live CI state: %v", checksErr), nil
 	}
 	if allChecksPassed(checks) {
 		return "", nil
@@ -219,6 +235,59 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 		return fmt.Sprintf("live checks for %s: no checks reported", prURL), nil
 	}
 	return fmt.Sprintf("live checks for %s not all passed: %s", prURL, strings.Join(unresolvedCheckNames(checks), ", ")), nil
+}
+
+// parkedGateFindings returns the findings persisted with this step's result -
+// what the gate parked on - or "" when there is no step result yet.
+func parkedGateFindings(sctx *pipeline.StepContext) (string, error) {
+	if sctx.StepResultID == "" {
+		return "", nil
+	}
+	stepResult, err := sctx.DB.GetStepResult(sctx.StepResultID)
+	if err != nil {
+		return "", err
+	}
+	if stepResult == nil || stepResult.FindingsJSON == nil {
+		return "", nil
+	}
+	return *stepResult.FindingsJSON, nil
+}
+
+// headRewriteOverrideReason names the unresolved condition a completion over a
+// published-head-rewrite park carries, or "" when the gate parked on something
+// else. Approving that park is allowed, but the checks it approves are the
+// forge's for a head this run validated nowhere, so the completion is recorded
+// as passed-with-override however green they are. liveHead may be empty when
+// the caller has not read the forge's head.
+func headRewriteOverrideReason(sctx *pipeline.StepContext, parkedFindings, liveHead string) string {
+	if !pipeline.HasCIHeadRewriteRefusal(parkedFindings) {
+		return ""
+	}
+	live := "a head the forge did not report"
+	if head := strings.TrimSpace(liveHead); head != "" {
+		live = shortSHA(head)
+	}
+	return fmt.Sprintf(
+		"the pull request branch moved to a head this run owns nowhere: the run validated %s and the pull request carries %s, so no check result here is a verdict on the validated head",
+		shortSHA(sctx.Run.HeadSHA), live,
+	)
+}
+
+// recordHeadRewriteOverride persists that unresolved condition when a
+// reconciliation resolves a published-head-rewrite park without a human
+// verdict, so the completion can never read as an ordinary clean pass. The
+// write is fail-closed for the reason applyApprovalOverride records: a
+// swallowed failure completes the step as that plain pass.
+func recordHeadRewriteOverride(sctx *pipeline.StepContext, liveHead string) error {
+	parked, err := parkedGateFindings(sctx)
+	if err != nil {
+		return fmt.Errorf("read the parked CI gate findings: %w", err)
+	}
+	reason := headRewriteOverrideReason(sctx, parked, liveHead)
+	if reason == "" {
+		return nil
+	}
+	return sctx.DB.SetStepOverrideReason(sctx.StepResultID, reason)
 }
 
 func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, ownHeads []string) error {
@@ -251,15 +320,9 @@ func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, ownHeads 
 }
 
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutcome, err error) {
-	refusalFindings := ""
-	if sctx.StepResultID != "" {
-		stepResult, err := sctx.DB.GetStepResult(sctx.StepResultID)
-		if err != nil {
-			return nil, fmt.Errorf("restore CI protected-path refusal: %w", err)
-		}
-		if stepResult != nil && stepResult.FindingsJSON != nil {
-			refusalFindings = *stepResult.FindingsJSON
-		}
+	refusalFindings, err := parkedGateFindings(sctx)
+	if err != nil {
+		return nil, fmt.Errorf("restore CI protected-path refusal: %w", err)
 	}
 	retryRefusal := sctx.Fixing && pipeline.HasProtectedPathRefusal(refusalFindings)
 	// A fix round repairs the findings the executor selected for it, unless

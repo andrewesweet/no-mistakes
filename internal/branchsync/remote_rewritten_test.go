@@ -633,3 +633,34 @@ func TestUnreadableReboundMarkerBlocksInsteadOfReportingSynchronized(t *testing.
 		t.Fatalf("next action = %#v, want a retry", state.NextAction)
 	}
 }
+
+// The marker only ever speaks to a branch that equals its push binding, so an
+// unreadable marker must leave every other relation alone. Before this, the
+// read ran at the top of classifyRelation and a failed one turned an ordinary
+// strict fast-forward into a blocked plan over state with no bearing on it.
+func TestUnreadableReboundMarkerLeavesAFastForwardPlanAlone(t *testing.T) {
+	t.Parallel()
+
+	f := newSyncFixture(t)
+	// The local branch sits one commit behind the pipeline's published head.
+	if state := f.service.Refresh(f.ctx); state.State != StateBehind {
+		t.Fatalf("state = %#v, want the ordinary behind relation before the marker becomes unreadable", state)
+	}
+
+	raw, err := sql.Open("sqlite", filepath.Join(filepath.Dir(f.local), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`DROP TABLE unvalidated_rebound_heads`); err != nil {
+		t.Fatal(err)
+	}
+
+	state := f.service.Refresh(f.ctx)
+	if state.State != StateBehind || state.Safety == "blocked_rebound_marker_unreadable" {
+		t.Fatalf("state = %#v, want the fast-forward plan untouched by a marker read failure", state)
+	}
+	if state.BoundHeadUnvalidated != "" {
+		t.Fatalf("BoundHeadUnvalidated = %q, want no claim either way", state.BoundHeadUnvalidated)
+	}
+}

@@ -1,10 +1,13 @@
 package steps
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // TestCIStep_VerifyApprovalOverride pins CIStep's implementation of
@@ -132,5 +135,89 @@ func TestCIStep_VerifyApprovalOverride_EmptyChecks(t *testing.T) {
 	}
 	if unresolved == "" {
 		t.Fatal("unresolved = \"\", want a fail-closed reason when the PR reports no checks at all")
+	}
+}
+
+// A human may approve the published-head-rewrite park - that is the verdict the
+// gate offers - but the checks being approved are the forge's for a head this
+// run validated nowhere, so the completion must be recorded as
+// passed-with-override however green they are. Before this, green checks for the
+// foreign head returned "" and the run completed reporting CI passed for a
+// commit Review and Test never saw.
+func TestCIStep_VerifyApprovalOverride_HeadRewriteParkIsNeverACleanPass(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	prURL := "https://github.com/test/repo/pull/42"
+	const foreign = "1111111111111111111111111111111111111111"
+	sctx := newTestContextWithDBRecords(t, nil, dir, "base", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", config.Commands{})
+	sctx.Env = append(fakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`), "FAKE_CLI_PR_HEAD_SHA="+foreign)
+	sctx.Run.PRURL = &prURL
+
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	park := parkPublishedHeadRewrite(sctx.Run.HeadSHA, sctx.Run.HeadSHA, foreign, "the run worktree holds commits that are neither on the live head nor recorded as published")
+	if err := sctx.DB.SetStepFindings(stepResult.ID, park.Findings); err != nil {
+		t.Fatal(err)
+	}
+
+	unresolved, err := (&CIStep{}).VerifyApprovalOverride(sctx)
+	if err != nil {
+		t.Fatalf("VerifyApprovalOverride() error = %v", err)
+	}
+	if unresolved == "" {
+		t.Fatal("unresolved = \"\", want the head rewrite recorded as an unresolved condition despite the green checks")
+	}
+	for _, want := range []string{shortSHA(sctx.Run.HeadSHA), shortSHA(foreign)} {
+		if !strings.Contains(unresolved, want) {
+			t.Fatalf("unresolved = %q, want it to name %q", unresolved, want)
+		}
+	}
+}
+
+// The same invariant on the reconciliation path: a PR closed while the gate sat
+// parked on a head rewrite resolves the gate, but the completion carries the
+// override record rather than reading as an ordinary pass.
+func TestCIStep_ReconcileApprovalGate_ClosedPRRecordsTheHeadRewriteOverride(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "initial")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	prURL := "https://github.com/test/repo/pull/42"
+	const foreign = "1111111111111111111111111111111111111111"
+	sctx := newTestContextWithDBRecords(t, nil, dir, headSHA, headSHA, config.Commands{})
+	sctx.Env = fakeCIGH(t, "CLOSED", `[]`)
+	sctx.Run.PRURL = &prURL
+
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	park := parkPublishedHeadRewrite(headSHA, headSHA, foreign, "the run worktree holds commits that are neither on the live head nor recorded as published")
+	if err := sctx.DB.SetStepFindings(stepResult.ID, park.Findings); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := (&CIStep{}).ReconcileApprovalGate(sctx)
+	if err != nil || !resolved {
+		t.Fatalf("ReconcileApprovalGate() = (%v, %v), want the closed PR to resolve the gate", resolved, err)
+	}
+	after, err := sctx.DB.GetStepResult(stepResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.OverrideReason == nil || !strings.Contains(*after.OverrideReason, "owns nowhere") {
+		t.Fatalf("override reason = %v, want the head rewrite recorded as unresolved", after.OverrideReason)
 	}
 }
