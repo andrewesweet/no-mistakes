@@ -3,7 +3,6 @@ package eval
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -23,25 +22,11 @@ func writeReplayCaseConfig(t *testing.T, repoYAML string) string {
 	return dir
 }
 
-// A case captured before capture refused stacked runs records a base derived
-// from the DEFAULT branch while its review saw the narrower parent-branch diff,
-// so replaying it would score the candidate against gold labels for a different
-// change. Such a case fails loudly instead.
-func TestReplayConfigRefusesACaseScopedToAnotherBaseBranch(t *testing.T) {
-	dir := writeReplayCaseConfig(t, "pr:\n  base_branch: develop\n")
-
-	_, err := replayConfig(Case{Manifest: Manifest{ID: "case-1", DefaultBranch: "main"}, Dir: dir})
-	if err == nil {
-		t.Fatal("replayConfig error = nil, want refusal for a non-default captured base branch")
-	}
-	if !strings.Contains(err.Error(), "develop") || !strings.Contains(err.Error(), "main") {
-		t.Fatalf("replayConfig error = %q, want both the captured base branch and the default named", err)
-	}
-}
-
-// Ordinary path: a captured base branch equal to the repository default (or
-// absent) replays, and the rest of the captured repo config survives.
-func TestReplayConfigKeepsACaseOnTheRepositoryDefaultBranch(t *testing.T) {
+// The captured repo config replays as recorded, including a pr.base_branch: it
+// is the PR target, not the scoping base, so replay neither honors nor refuses
+// it. Capture is the guard that keeps a non-default-scoped run out of the
+// corpus.
+func TestReplayConfigKeepsTheCapturedRepositoryConfig(t *testing.T) {
 	for _, tc := range []struct{ name, repoYAML, defaultBranch string }{
 		{name: "no captured base branch", repoYAML: "ignore_patterns:\n  - \"vendor/**\"\n", defaultBranch: "main"},
 		{name: "captured base branch is the default", repoYAML: "pr:\n  base_branch: develop\nignore_patterns:\n  - \"vendor/**\"\n", defaultBranch: "develop"},

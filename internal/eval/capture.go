@@ -201,12 +201,15 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 		if err != nil {
 			return nil, fmt.Errorf("read review round %q global configuration: %w", round.ID, err)
 		}
-		roundRepoConfig, err := config.LoadRepoFromBytes(round.RepoConfigYAML)
-		if err != nil {
+		if _, err := config.LoadRepoFromBytes(round.RepoConfigYAML); err != nil {
 			return nil, fmt.Errorf("read review round %q repository configuration: %w", round.ID, err)
 		}
-		if base := capturedBaseBranch(run, roundRepoConfig, repo.DefaultBranch); base != strings.TrimSpace(repo.DefaultBranch) {
-			return nil, fmt.Errorf("%w: review round %q was reviewed against base branch %q rather than the repository default %q, and replay restores only the default branch, so the case would be replayed and scored against a different diff", ErrNoCapturableReview, round.ID, base, strings.TrimSpace(repo.DefaultBranch))
+		trustedRepoConfig, err := repoConfigAt(ctx, gateDir, trustedSHA)
+		if err != nil {
+			return nil, fmt.Errorf("read review round %q trusted repository configuration: %w", round.ID, err)
+		}
+		if base := capturedBaseBranch(run, trustedRepoConfig, repo.DefaultBranch); base != strings.TrimSpace(repo.DefaultBranch) {
+			return nil, fmt.Errorf("%w: review round %q was reviewed against base branch %q rather than the repository default %q, and replay restores only the default branch, so the case would be replayed and scored against a different diff; such a run stays out of the corpus until a case manifest records its scoping base", ErrNoCapturableReview, round.ID, base, strings.TrimSpace(repo.DefaultBranch))
 		}
 		repoConfigBytes := append([]byte(nil), round.RepoConfigYAML...)
 		replayBaseSHA, err := effectiveReplayBase(ctx, gateDir, run.BaseSHA, reviewedSHA, trustedSHA)
@@ -277,15 +280,19 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 }
 
 // capturedBaseBranch is the base branch the captured review actually scoped
-// against: the per-run --base-branch override, else the round's recorded
-// pr.base_branch, else the repository default. Capture refuses anything but
-// the default because replay restores only refs/remotes/origin/<default>.
-func capturedBaseBranch(run *db.Run, roundRepoConfig *config.RepoConfig, defaultBranch string) string {
+// against, resolved the way the validation steps resolve it: the per-run
+// --base-branch override, else pr.base_branch from the TRUSTED config at the
+// round's pinned trusted SHA, else the repository default. It must read the
+// trusted copy rather than the round's recorded effective config, because
+// under allow_repo_commands the effective pr.base_branch is the PUSHED PR
+// target, which does not scope anything. Capture refuses anything but the
+// default because replay restores only refs/remotes/origin/<default>.
+func capturedBaseBranch(run *db.Run, trustedRepoConfig *config.RepoConfig, defaultBranch string) string {
 	if run != nil && run.PRBaseBranch != nil && strings.TrimSpace(*run.PRBaseBranch) != "" {
 		return strings.TrimSpace(*run.PRBaseBranch)
 	}
-	if roundRepoConfig != nil && strings.TrimSpace(roundRepoConfig.PR.BaseBranch) != "" {
-		return strings.TrimSpace(roundRepoConfig.PR.BaseBranch)
+	if trustedRepoConfig != nil && strings.TrimSpace(trustedRepoConfig.PR.BaseBranch) != "" {
+		return strings.TrimSpace(trustedRepoConfig.PR.BaseBranch)
 	}
 	return strings.TrimSpace(defaultBranch)
 }

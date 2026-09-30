@@ -203,16 +203,22 @@ func forcePushRebaseTargets(branch, defaultBranch string) []string {
 // rebases. Per-run overrides win over repo config; the repository default
 // remains the fallback when neither selects a separate PR target branch.
 func effectivePRBaseBranch(sctx *pipeline.StepContext) string {
-	defaultBranch := strings.TrimSpace(sctx.Repo.DefaultBranch)
 	if runBase := runPRBaseBranch(sctx); runBase != "" {
-		defaultBranch = runBase
-	} else if sctx.Config != nil && strings.TrimSpace(sctx.Config.PR.BaseBranch) != "" {
-		defaultBranch = strings.TrimSpace(sctx.Config.PR.BaseBranch)
+		return runBase
 	}
-	if defaultBranch == "" {
-		defaultBranch = "main"
+	if sctx.Config != nil && strings.TrimSpace(sctx.Config.PR.BaseBranch) != "" {
+		return strings.TrimSpace(sctx.Config.PR.BaseBranch)
 	}
-	return defaultBranch
+	return repoDefaultBranch(sctx)
+}
+
+// repoDefaultBranch is the repository's default branch, falling back to "main"
+// for a record that carries none.
+func repoDefaultBranch(sctx *pipeline.StepContext) string {
+	if branch := strings.TrimSpace(sctx.Repo.DefaultBranch); branch != "" {
+		return branch
+	}
+	return "main"
 }
 
 // detectBundledLocalDefaultCommits returns a blocking finding when the gated

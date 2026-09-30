@@ -481,15 +481,12 @@ func replayConfig(c Case) (*config.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load captured repo config: %w", err)
 	}
-	// A case whose captured pr.base_branch is not the repository default was
-	// reviewed against a narrower diff than Manifest.BaseSHA records (capture
-	// derives that base from the default branch), so the candidate's findings
-	// would be scored against gold labels drawn from a different diff. Capture
-	// refuses such a run now; a case stored before it did fails loudly here
-	// rather than producing a wrong score.
-	if base := strings.TrimSpace(repo.PR.BaseBranch); base != "" && base != replayDefaultBranch(c) {
-		return nil, fmt.Errorf("case %q was reviewed against base branch %q rather than the repository default %q, so its recorded diff and gold labels do not describe the same change; recapture it", c.ID, base, replayDefaultBranch(c))
-	}
+	// Nothing here can tell whether the captured review scoped against a
+	// non-default base branch: the recorded effective pr.base_branch is the PR
+	// target, not the scoping base, and no manifest field records the scoping
+	// base. Capture refuses such a run (see capturedBaseBranch), so only a case
+	// stored before that guard can carry the mismatch, and it replays against
+	// the base the manifest recorded.
 	return config.Merge(global, repo), nil
 }
 

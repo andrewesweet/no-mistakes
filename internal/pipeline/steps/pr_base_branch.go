@@ -59,11 +59,8 @@ func scopingBaseBranch(sctx *pipeline.StepContext) string {
 	if runBase := runPRBaseBranch(sctx); runBase != "" {
 		return runBase
 	}
-	if sctx != nil && sctx.Config != nil && strings.TrimSpace(sctx.Config.PR.ScopingBaseBranch) != "" {
-		return strings.TrimSpace(sctx.Config.PR.ScopingBaseBranch)
+	if trustedBase := strings.TrimSpace(sctx.Config.PR.ScopingBaseBranch); trustedBase != "" {
+		return trustedBase
 	}
-	if sctx != nil && sctx.Repo != nil && strings.TrimSpace(sctx.Repo.DefaultBranch) != "" {
-		return strings.TrimSpace(sctx.Repo.DefaultBranch)
-	}
-	return "main"
+	return repoDefaultBranch(sctx)
 }
