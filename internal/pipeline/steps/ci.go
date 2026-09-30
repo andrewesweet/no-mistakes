@@ -351,29 +351,31 @@ func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, ownHeads 
 //
 // A push-target read that fails says nothing about ownership, so it warns and
 // waits rather than reporting checks or failing the run; the caller counts
-// those failures with the same limit the provider check read uses, so an
-// unreadable target becomes an actionable park rather than an endless spin.
-func (s *CIStep) guardPublishedHead(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, stateKnown bool) (outcome *pipeline.StepOutcome, skipChecks, readFailed bool, err error) {
+// every poll that skips the checks, whatever the reason, so no such condition
+// can repeat forever.
+func (s *CIStep) guardPublishedHead(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, stateKnown bool) (outcome *pipeline.StepOutcome, skipChecks bool, err error) {
 	liveHead, err := publishedBranchHead(sctx)
 	if err != nil {
 		sctx.Log(fmt.Sprintf("warning: could not read the published branch head, so no check result is read this poll: %v", err))
-		return nil, true, true, nil
+		return nil, true, nil
 	}
 	if s.ciRunOwnsHead(sctx, liveHead) {
-		return nil, false, false, nil
+		return nil, false, nil
 	}
 	if !stateKnown {
 		sctx.Log(fmt.Sprintf("warning: the push target serves %s, which this run owns nowhere, but the pull request state could not be read: no check result is read this poll and nothing is adopted until it can be", shortSHA(liveHead)))
-		return nil, true, false, nil
+		return nil, true, nil
 	}
-	adopted, adoptReadFailed, err := s.adoptPublishedHeadRewrite(sctx, host, pr, "the push target served head", liveHead)
+	adopted, err := s.adoptPublishedHeadRewrite(sctx, host, pr, "the push target served head", liveHead)
 	if err != nil {
-		return nil, false, false, err
+		return nil, false, err
 	}
-	// A nil outcome means nothing was adopted because the fetched head turned
-	// out to be one the run owns; the checks still belong to the head the
-	// provider reported, so this poll reads none of them.
-	return adopted, adopted == nil, adoptReadFailed, nil
+	// A nil outcome means nothing was adopted - the fetched head turned out to
+	// be one the run owns, or the fetch itself failed; the checks still belong
+	// to the head the provider reported, so this poll reads none of them. The
+	// caller counts that the same way whichever it was: a monitor that never
+	// gets the two reads to agree is as stuck as one that cannot read at all.
+	return adopted, adopted == nil, nil
 }
 
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutcome, err error) {
@@ -552,6 +554,17 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	timeoutMergeConflict := false
 	lastMonitorLog := ""
 	consecutiveCheckErrs := 0
+	// consecutiveUnreadPolls counts polls that ended without reading a check
+	// for a head this run owns - an unreadable push target, a pull request
+	// state nobody could read while the branch head is foreign, a fetched head
+	// the two reads still disagree about, an adoption whose fetch keeps
+	// failing. Each is a legitimate reason to skip ONE poll and none of them is
+	// a reason to skip forever: under `ci_timeout: unlimited` that is an
+	// invisible spin, and under a finite one it parks on the wrong condition.
+	// Only a poll that actually read checks for an owned head clears it, which
+	// is why it cannot share consecutiveCheckErrs - that counter is reset by
+	// the check read itself, before these paths run.
+	consecutiveUnreadPolls := 0
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
 		sctx.Log("CI timeout reached")
 		var outcome *pipeline.StepOutcome
@@ -659,26 +672,19 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		// cases are an open PR and a state read that failed - and a failed
 		// state read is no reason to report checks for a head nobody proved the
 		// run owns.
-		outcome, skipChecks, headReadFailed, guardErr := s.guardPublishedHead(sctx, host, pr, prStateKnown)
+		outcome, skipChecks, guardErr := s.guardPublishedHead(sctx, host, pr, prStateKnown)
 		if guardErr != nil {
 			return nil, guardErr
 		}
 		if outcome != nil {
 			return outcome, nil
 		}
-		if headReadFailed {
-			// Same rule the provider check read follows: a read that keeps
-			// failing is an actionable stop, not an invisible spin. Without it
-			// an unreadable push target - rotated credentials, a deleted branch
-			// on an open PR - reads no check forever under an unlimited
-			// ci_timeout, and parks on the wrong condition under a finite one.
-			consecutiveCheckErrs++
-			if consecutiveCheckErrs >= consecutiveCheckErrorLimit {
-				sctx.Log(fmt.Sprintf("the published branch head could not be read %d consecutive times, parking for a decision", consecutiveCheckErrs))
-				return ciTerminalRepairOutcome(ciPublishedHeadReadFailureOutcome(), Findings{}, sctx.DeferredFindings), nil
-			}
-		}
 		if skipChecks {
+			consecutiveUnreadPolls++
+			if consecutiveUnreadPolls >= consecutiveCheckErrorLimit {
+				sctx.Log(fmt.Sprintf("no check could be read for a head this run owns on %d consecutive polls, parking for a decision", consecutiveUnreadPolls))
+				return ciTerminalRepairOutcome(ciUnownedHeadStallOutcome(), Findings{}, sctx.DeferredFindings), nil
+			}
 			if err := waitForPoll(); err != nil {
 				return nil, err
 			}
@@ -731,28 +737,30 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			// never validated. The same adoption applies before any of those
 			// results can establish readiness.
 			if observed := strings.TrimSpace(pr.HeadSHA); observed != "" && !s.ciRunOwnsHead(sctx, observed) {
-				outcome, adoptReadFailed, adoptErr := s.adoptPublishedHeadRewrite(sctx, host, pr, "the pull request reports head", observed)
+				outcome, adoptErr := s.adoptPublishedHeadRewrite(sctx, host, pr, "the pull request reports head", observed)
 				if adoptErr != nil {
 					return nil, adoptErr
 				}
 				if outcome != nil {
 					return outcome, nil
 				}
-				if adoptReadFailed {
-					consecutiveCheckErrs++
-					if consecutiveCheckErrs >= consecutiveCheckErrorLimit {
-						sctx.Log(fmt.Sprintf("the published branch head could not be read %d consecutive times, parking for a decision", consecutiveCheckErrs))
-						return ciTerminalRepairOutcome(ciPublishedHeadReadFailureOutcome(), Findings{}, sctx.DeferredFindings), nil
-					}
+				// Nothing was adopted - the push target serves a head this run
+				// owns, or its own read failed. These checks still belong to a
+				// head the run never validated, so none of them may be read:
+				// keep polling, on the same bound every other unread poll has.
+				consecutiveUnreadPolls++
+				if consecutiveUnreadPolls >= consecutiveCheckErrorLimit {
+					sctx.Log(fmt.Sprintf("no check could be read for a head this run owns on %d consecutive polls, parking for a decision", consecutiveUnreadPolls))
+					return ciTerminalRepairOutcome(ciUnownedHeadStallOutcome(), Findings{}, sctx.DeferredFindings), nil
 				}
-				// Nothing was adopted because the push target serves a head
-				// this run owns. These checks still belong to a head the run
-				// never validated, so none of them may be read: keep polling.
 				if err := waitForPoll(); err != nil {
 					return nil, err
 				}
 				continue
 			}
+			// The checks just read belong to a head this run owns, which is the
+			// only thing that clears the unread-poll bound.
+			consecutiveUnreadPolls = 0
 			// A failure the provider produced before the repository's own steps
 			// ran (a setup/action-resolution outage) is infrastructure, not a
 			// verdict on the code. Re-bucket those into the transient path before

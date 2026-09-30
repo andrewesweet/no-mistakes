@@ -625,3 +625,56 @@ func TestCIStep_UnreadablePublishedHeadParksAfterTheReadLimit(t *testing.T) {
 		t.Fatalf("worktree head moved to %s", got)
 	}
 }
+
+// Every poll that ends without a check for a head this run owns is bounded by
+// the same counter, because each of these conditions can repeat forever: under
+// `ci_timeout: unlimited` the monitor never ends, and under a finite one it
+// parks naming the wrong condition. Counting them separately left two of them
+// unbounded - one never incremented anything, the other shared a counter the
+// check read clears on every poll.
+func TestCIStep_PollsThatReadNoOwnedCheckAreBounded(t *testing.T) {
+	t.Parallel()
+	for name, setup := range map[string]func(t *testing.T, dir string) []string{
+		// The state read fails and the push target serves a head the run owns
+		// nowhere: nothing may be adopted under an unknown state, and no check
+		// may be read either.
+		"state unreadable with a foreign head": func(t *testing.T, dir string) []string {
+			pushDescendantRewrite(t, dir)
+			return []string{"FAKE_CLI_STATE_ERR=the pull request state could not be read"}
+		},
+		// The provider keeps naming a head the push target does not serve, so
+		// the two reads never agree and the adoption adopts nothing.
+		"provider head the push target never serves": func(t *testing.T, dir string) []string {
+			tree := stepstest.GitCmd(t, dir, "rev-parse", "HEAD^{tree}")
+			ghost := stepstest.GitCmd(t, dir, "commit-tree", tree, "-m", "head only the provider reports")
+			return []string{"FAKE_CLI_PR_HEAD_SHA=" + ghost}
+		},
+	} {
+		setup := setup
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+			env := append(revalidateEnv(t, `[{"name":"test","state":"SUCCESS","bucket":"pass"}]`, ""), setup(t, dir)...)
+			_, sctx, _ := revalidateContext(t, dir, upstream, baseSHA, headSHA, env)
+
+			step := (&steps.CIStep{}).SetWaitForNextPoll(func(ctx context.Context, interval time.Duration) error { return nil })
+			outcome, err := step.Execute(sctx)
+			if err != nil {
+				t.Fatalf("CI step returned error: %v", err)
+			}
+			if outcome == nil || !outcome.NeedsApproval {
+				t.Fatalf("outcome = %#v, want an ask-user park once the unread-poll bound is hit", outcome)
+			}
+			var findings types.Findings
+			if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+				t.Fatalf("decode findings: %v", err)
+			}
+			if len(findings.Items) != 1 || !strings.Contains(findings.Items[0].Description, "a head this run validated") {
+				t.Fatalf("findings = %+v, want one finding naming the unread condition", findings.Items)
+			}
+			if got := stepstest.GitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+				t.Fatalf("worktree head moved to %s", got)
+			}
+		})
+	}
+}

@@ -370,16 +370,19 @@ func ciCheckReadFailureOutcome(err error) *pipeline.StepOutcome {
 	}
 }
 
-// ciPublishedHeadReadFailureOutcome parks the CI step when the push target's
-// branch head stayed unreadable. Ownership of the live head cannot be proven
-// without it, so no check may be read; naming the push target is what separates
-// this park from the generic CI timeout it would otherwise spin into.
-func ciPublishedHeadReadFailureOutcome() *pipeline.StepOutcome {
+// ciUnownedHeadStallOutcome parks the CI step when consecutive polls all ended
+// without reading a check for a head this run owns: an unreadable push target,
+// a pull request state nobody could read while the branch head is foreign, or
+// an adoption whose own reads keep failing. None of those can be attributed to
+// a validated head, so none may be reported - and naming the condition is what
+// separates this park from the generic CI timeout it would otherwise spin into,
+// or from no ending at all under an unlimited timeout.
+func ciUnownedHeadStallOutcome() *pipeline.StepOutcome {
 	findings := Findings{
-		Summary: "The pull request branch head could not be read from the push target",
+		Summary: "No check could be read for a head this run validated",
 		Items: []Finding{{
 			Severity:    "warning",
-			Description: "the branch head could not be read from the push target on several consecutive polls, so no check result can be attributed to a head this run validated. Verify that the push target is reachable, that its credentials are current, and that the pull request branch still exists there.",
+			Description: "several consecutive polls ended without a check result for a head this run validated: the pull request branch head, or the pull request state, could not be read, or the head the provider reports and the head the push target serves kept disagreeing. Verify that the push target and the provider are reachable, that their credentials are current, and that the pull request branch still exists.",
 			Action:      types.ActionAskUser,
 		}},
 	}
