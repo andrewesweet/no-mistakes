@@ -454,9 +454,19 @@ func extractTrailingNumber(rawURL string) int {
 // CI step's restart-at-Review base alignment reads. FAKE_CLI_PR_BASE overrides
 // the default main; the sentinel "-" reports no base at all, and "!" fails the
 // read outright - the two ways a forge can decline to name a base.
+// FAKE_CLI_PR_BASE_OK_AFTER names a file whose existence ends a transient
+// outage: every read before it appears fails, every read after it answers
+// normally. A test that creates the file at a known moment - from the fix
+// agent, say - can put the outage on exactly the reads that precede it.
 func fakeGHPRBaseBranch(joined string) {
 	if !strings.Contains(joined, "pr view") || !strings.Contains(joined, "--json baseRefName") {
 		return
+	}
+	if marker := os.Getenv("FAKE_CLI_PR_BASE_OK_AFTER"); marker != "" {
+		if _, err := os.Stat(marker); err != nil {
+			fmt.Fprintln(os.Stderr, "fake gh: the pull request base could not be read")
+			os.Exit(1)
+		}
 	}
 	base := os.Getenv("FAKE_CLI_PR_BASE")
 	switch base {

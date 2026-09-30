@@ -128,11 +128,17 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 			// the restart, while an empty or informational set proceeds.
 			// Before any restart at Review, the run's persisted per-run base is
 			// aligned with the pull request's live forge base, so a retargeted
-			// layer keeps its layer-only scope. The base was resolved before
-			// the repair mutated anything (see resolveLivePRBase), and only a
-			// restart needs it: a publishable repair owes the forge nothing.
+			// layer keeps its layer-only scope. The pre-repair read is the fast
+			// path; only a restart needs the base, and by here the repair has
+			// already committed, so a read that failed then is re-tried rather
+			// than failing the run over a forge blip that says nothing about
+			// the repair - which would leave the recorded head unvalidated with
+			// no revalidation scheduled.
 			if baseErr != nil {
-				return nil, baseErr
+				liveBase, baseErr = resolveLivePRBase(sctx, host, pr)
+				if baseErr != nil {
+					return nil, baseErr
+				}
 			}
 			if err := applyRunPRBase(sctx, liveBase); err != nil {
 				return nil, err

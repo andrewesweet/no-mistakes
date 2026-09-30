@@ -416,11 +416,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	}
 	pr := &scm.PR{Number: prNumber, URL: prURL}
 	if retryRefusal {
-		// The pull request's live base is resolved before the retained repair
-		// can commit or record anything, so a base the forge will not report
-		// fails the step closed while the run still sits on its validated head.
-		// Only a restart at Review consumes it, so the read failure is carried
-		// and a repair that publishes is never abandoned over it.
+		// The pull request's live base is read before the retained repair can
+		// commit or record anything, as the fast path. Only a restart at Review
+		// consumes it, so the read failure is carried and a repair that
+		// publishes is never abandoned over it.
 		liveBase, baseErr := resolveLivePRBase(sctx, host, pr)
 		if err := setCIMonitorReadiness(sctx, false, false); err != nil {
 			return nil, err
@@ -432,9 +431,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		retryRefusal = false
 		if repair.Revalidate {
 			// Same rule as every other CI restart at Review: the run's
-			// persisted base becomes the pull request's live forge base.
+			// persisted base becomes the pull request's live forge base. The
+			// retained repair has already committed by here, so a pre-read that
+			// failed is re-tried rather than failing the run over it.
 			if baseErr != nil {
-				return nil, baseErr
+				liveBase, baseErr = resolveLivePRBase(sctx, host, pr)
+				if baseErr != nil {
+					return nil, baseErr
+				}
 			}
 			if err := applyRunPRBase(sctx, liveBase); err != nil {
 				return nil, err

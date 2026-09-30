@@ -652,3 +652,71 @@ func TestCIStep_UnreadableLiveBaseOnlyStopsTheRestartingRepair(t *testing.T) {
 		})
 	}
 }
+
+// A base read that fails BEFORE the repair says nothing about the repair, and
+// by the time the restart needs the base the repair has already committed and
+// cleared the review approval. Failing the run there left a recorded head no
+// Review had validated with no revalidation scheduled, so the read is re-tried
+// at the restart instead and the run restarts at Review with the live base.
+func TestCIStep_TransientBaseReadStillRestartsTheRepairAtReview(t *testing.T) {
+	t.Parallel()
+
+	// The outage covers every base read up to and including the pre-repair
+	// one; the fix agent ends it, so only the read at the restart succeeds.
+	forgeBack := filepath.Join(t.TempDir(), "forge-back")
+	f := newCIRepairFixture(t, true, func(workDir string) {
+		writeCIFix(workDir)
+		if err := os.WriteFile(forgeBack, []byte("reachable\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	f.sctx.Env = append(f.sctx.Env, "FAKE_CLI_PR_BASE=main", "FAKE_CLI_PR_BASE_OK_AFTER="+forgeBack)
+
+	outcome, err := f.run(t)
+	if err != nil {
+		t.Fatalf("CI step returned error: %v\nlog:\n%s", err, f.log())
+	}
+	if outcome == nil || outcome.RestartFrom != types.StepReview {
+		t.Fatalf("outcome = %#v, want a restart from Review despite the first base read failing\nlog:\n%s", outcome, f.log())
+	}
+	run, err := f.sctx.DB.GetRun(f.sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PRBaseBranch == nil || *run.PRBaseBranch != "main" {
+		t.Fatalf("persisted base = %v, want the live base read at the restart", run.PRBaseBranch)
+	}
+	if run.HeadSHA == f.headSHA {
+		t.Fatalf("recorded head = %s, want the repair commit recorded", run.HeadSHA)
+	}
+}
+
+// applyRunPRBase is a write path into runs.pr_base_branch, so the
+// forge-reported name goes through the same validator every operator-facing
+// writer runs: an unusable ref name is refused rather than persisted and
+// re-read as a ref by every later step.
+func TestApplyRunPRBase_RefusesAnUnusableBranchName(t *testing.T) {
+	t.Parallel()
+
+	f := newCIRepairFixture(t, true, nil)
+	if err := applyRunPRBase(f.sctx, "bad..base"); err == nil || !strings.Contains(err.Error(), "not a usable branch name") {
+		t.Fatalf("applyRunPRBase() error = %v, want the unusable name refused", err)
+	}
+	run, err := f.sctx.DB.GetRun(f.sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PRBaseBranch != nil {
+		t.Fatalf("persisted base = %q, want nothing persisted", *run.PRBaseBranch)
+	}
+	if err := applyRunPRBase(f.sctx, "develop"); err != nil {
+		t.Fatalf("applyRunPRBase() error = %v, want a usable name persisted", err)
+	}
+	run, err = f.sctx.DB.GetRun(f.sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PRBaseBranch == nil || *run.PRBaseBranch != "develop" {
+		t.Fatalf("persisted base = %v, want develop", run.PRBaseBranch)
+	}
+}
