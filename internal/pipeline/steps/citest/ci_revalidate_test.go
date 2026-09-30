@@ -310,18 +310,27 @@ func TestCIStep_ForeignProviderHeadWithAnOwnedPushTargetAdoptsNothing(t *testing
 }
 
 // A pull request whose live base the forge will not name fails the step
-// closed: the restart at Review never happens against a stale recorded base.
+// closed, and closed means nothing moved: the live base is read before the
+// adoption touches the worktree, the run head, or the review approval, so the
+// run is still sitting on the head it validated when the step gives up.
 func TestCIStep_AdoptionFailsClosedWhenTheLiveBaseIsUnreported(t *testing.T) {
 	t.Parallel()
 	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
-	pushDescendantRewrite(t, dir)
+	rewritten := pushDescendantRewrite(t, dir)
 
 	env := revalidateEnv(t, `[{"name":"test","state":"SUCCESS","bucket":"pass"}]`, "-")
 	_, sctx, _ := revalidateContext(t, dir, upstream, baseSHA, headSHA, env)
+	approved := headSHA
+	if err := sctx.DB.UpdateRunReviewApprovedHeadSHA(sctx.Run.ID, approved); err != nil {
+		t.Fatal(err)
+	}
 
 	outcome, err := (&steps.CIStep{}).Execute(sctx)
 	if err == nil || !strings.Contains(err.Error(), "no live base branch") {
 		t.Fatalf("outcome = %#v, err = %v, want the base alignment to fail closed", outcome, err)
+	}
+	if got := stepstest.GitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("worktree head = %s, want the validated %s (the rewrite %s must not be adopted)", got, headSHA, rewritten)
 	}
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
@@ -329,5 +338,11 @@ func TestCIStep_AdoptionFailsClosedWhenTheLiveBaseIsUnreported(t *testing.T) {
 	}
 	if run.PRBaseBranch != nil {
 		t.Fatalf("persisted base = %q, want no base recorded", *run.PRBaseBranch)
+	}
+	if run.HeadSHA != headSHA {
+		t.Fatalf("durable run head = %s, want the validated %s", run.HeadSHA, headSHA)
+	}
+	if run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != approved {
+		t.Fatalf("review approval = %v, want it untouched at %s", run.ReviewApprovedHeadSHA, approved)
 	}
 }

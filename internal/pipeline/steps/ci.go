@@ -344,6 +344,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	}
 	pr := &scm.PR{Number: prNumber, URL: prURL}
 	if retryRefusal {
+		// The pull request's live base is resolved before the retained repair
+		// can commit or record anything, so a base the forge will not report
+		// fails the step closed while the run still sits on its validated head.
+		liveBase, err := resolveLivePRBase(sctx, host, pr)
+		if err != nil {
+			return nil, err
+		}
 		if err := setCIMonitorReadiness(sctx, false, false); err != nil {
 			return nil, err
 		}
@@ -353,10 +360,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 		retryRefusal = false
 		if repair.Revalidate {
-			// Before this restart at Review, align the run's persisted base
-			// with the pull request's live forge base (same rule as every
-			// other CI restart at Review).
-			if err := alignRunBaseWithLivePRBase(sctx, host, pr); err != nil {
+			// Same rule as every other CI restart at Review: the run's
+			// persisted base becomes the pull request's live forge base.
+			if err := applyRunPRBase(sctx, liveBase); err != nil {
 				return nil, err
 			}
 			return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil

@@ -117,9 +117,10 @@ func parkPublishedHeadRewrite(recorded, worktreeHead, liveHead, reason string) *
 // CI repair revalidates: the live head is fetched from the push target and
 // verified again just before the restart, a fetched head the run already owns
 // is not adopted at all (nil outcome: the caller keeps polling), the guard
-// refuses anything unattributable, recordLocalRepair advances the run head durably and clears
-// the review approval, the persisted per-run base is aligned with the pull
-// request's live base, and the outcome restarts the run at Review. Intent and
+// refuses anything unattributable, the pull request's live base is resolved
+// while nothing has changed yet, recordLocalRepair advances the run head
+// durably and clears the review approval, that base is persisted, and the
+// outcome restarts the run at Review. Intent and
 // Rebase are deliberately skipped (their content is base-relative and the
 // restart re-decides it), and the PR step will only refresh the body of the
 // existing pull request.
@@ -144,13 +145,17 @@ func (s *CIStep) adoptPublishedHeadRewrite(sctx *pipeline.StepContext, host scm.
 		sctx.Log(fmt.Sprintf("not adopting %s: %s", shortSHA(target), reason))
 		return parkPublishedHeadRewrite(recorded, worktreeHead, target, reason), nil
 	}
+	liveBase, err := resolveLivePRBase(sctx, host, pr)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := stepGitRun(sctx, "reset", "--hard", target); err != nil {
 		return nil, fmt.Errorf("move the run worktree to the adopted head %s: %w", shortSHA(target), err)
 	}
 	if _, err := s.recordLocalRepair(sctx, target, fmt.Sprintf("adopted rewritten pull request head %s (superseding %s); revalidation from Review required", shortSHA(target), shortSHA(recorded))); err != nil {
 		return nil, err
 	}
-	if err := alignRunBaseWithLivePRBase(sctx, host, pr); err != nil {
+	if err := applyRunPRBase(sctx, liveBase); err != nil {
 		return nil, err
 	}
 	return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
@@ -191,25 +196,34 @@ func fetchVerifiedPublishedHead(sctx *pipeline.StepContext) (string, error) {
 	return "", lastErr
 }
 
-// alignRunBaseWithLivePRBase sets the run's persisted per-run base to the
-// pull request's live forge base whenever the two differ, before any restart
-// at Review from the CI step. This covers repair revalidation as well as the
-// adoption path: without it, a restarted Review scopes the change against a
-// branch the pull request no longer targets, and a retargeted layer loses its
-// layer-only diff. A base the forge will not report fails the step closed
-// rather than restarting onto a base nobody could name.
-func alignRunBaseWithLivePRBase(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) error {
+// resolveLivePRBase reads the pull request's live forge base. Every CI path
+// that can restart at Review resolves it BEFORE it mutates anything, so a base
+// the forge will not report fails the step closed while the run still sits on
+// its validated head; applyRunPRBase then persists it at the restart itself. A
+// host that cannot report a base at all resolves to "" and persists nothing.
+func resolveLivePRBase(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) (string, error) {
 	reader, ok := host.(scm.PRBaseBranchReader)
 	if !ok {
-		return nil
+		return "", nil
 	}
 	liveBase, err := reader.GetPRBaseBranch(sctx.Ctx, pr)
 	if err != nil {
-		return fmt.Errorf("read the pull request's live base branch before restarting at Review: %w", err)
+		return "", fmt.Errorf("read the pull request's live base branch before restarting at Review: %w", err)
 	}
 	liveBase = strings.TrimSpace(liveBase)
 	if liveBase == "" {
-		return fmt.Errorf("the pull request reported no live base branch before restarting at Review")
+		return "", fmt.Errorf("the pull request reported no live base branch before restarting at Review")
+	}
+	return liveBase, nil
+}
+
+// applyRunPRBase sets the run's persisted per-run base to the base
+// resolveLivePRBase read, whenever the two differ. Without it a restarted
+// Review scopes the change against a branch the pull request no longer
+// targets, and a retargeted layer loses its layer-only diff.
+func applyRunPRBase(sctx *pipeline.StepContext, liveBase string) error {
+	if liveBase == "" {
+		return nil
 	}
 	current := runPRBaseBranch(sctx)
 	if current == liveBase {
