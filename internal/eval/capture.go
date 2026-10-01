@@ -204,6 +204,13 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 		if _, err := config.LoadRepoFromBytes(round.RepoConfigYAML); err != nil {
 			return nil, fmt.Errorf("read review round %q repository configuration: %w", round.ID, err)
 		}
+		trustedRepoConfig, err := repoConfigAt(ctx, gateDir, trustedSHA)
+		if err != nil {
+			return nil, fmt.Errorf("%w: review round %q pinned trusted configuration commit %s is no longer readable in the gate, so the base branch its review scoped against cannot be established: %v", ErrNoCapturableReview, round.ID, trustedSHA, err)
+		}
+		if base := capturedBaseBranch(run, trustedRepoConfig, repo.DefaultBranch); base != strings.TrimSpace(repo.DefaultBranch) {
+			return nil, fmt.Errorf("%w: review round %q was reviewed against base branch %q rather than the repository default %q, and replay restores only the default branch, so the case would be replayed and scored against a different diff; such a run stays out of the corpus until a case manifest records its scoping base", ErrNoCapturableReview, round.ID, base, strings.TrimSpace(repo.DefaultBranch))
+		}
 		repoConfigBytes := append([]byte(nil), round.RepoConfigYAML...)
 		replayBaseSHA, err := effectiveReplayBase(ctx, gateDir, run.BaseSHA, reviewedSHA, trustedSHA)
 		if err != nil {
@@ -272,11 +279,31 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 	return captured, nil
 }
 
-// effectiveReplayBase reproduces ReviewStep's branch-scoped base: the merge
-// base of the reviewed head and the pinned default branch. Run.BaseSHA is the
-// received-push old SHA, which may be a previous feature tip rather than the
-// review base. It is only a legacy fallback when the merge-base cannot be
-// recovered from an older gate.
+// capturedBaseBranch is the base branch the captured review actually scoped
+// against, resolved the way the validation steps resolve it: the per-run
+// --base-branch override, else pr.base_branch from the TRUSTED config at the
+// round's pinned trusted SHA, else the repository default. It must read the
+// trusted copy rather than the round's recorded effective config, because
+// under allow_repo_commands the effective pr.base_branch is the PUSHED PR
+// target, which does not scope anything. Capture refuses anything but the
+// default because replay restores only refs/remotes/origin/<default>.
+func capturedBaseBranch(run *db.Run, trustedRepoConfig *config.RepoConfig, defaultBranch string) string {
+	if run != nil && run.PRBaseBranch != nil && strings.TrimSpace(*run.PRBaseBranch) != "" {
+		return strings.TrimSpace(*run.PRBaseBranch)
+	}
+	if trustedRepoConfig != nil && strings.TrimSpace(trustedRepoConfig.PR.BaseBranch) != "" {
+		return strings.TrimSpace(trustedRepoConfig.PR.BaseBranch)
+	}
+	return strings.TrimSpace(defaultBranch)
+}
+
+// effectiveReplayBase reproduces ReviewStep's branch-scoped base for a
+// capturable case: the merge base of the reviewed head and the pinned default
+// branch. Such a case is scoped to the repository default branch by
+// construction (see capturedBaseBranch). Run.BaseSHA is the received-push old
+// SHA, which may be a previous feature tip rather than the review base. It is
+// only a legacy fallback when the merge-base cannot be recovered from an older
+// gate.
 func effectiveReplayBase(ctx context.Context, gateDir, recordedBase, head, trustedSHA string) (string, error) {
 	if base, err := git.Run(ctx, gateDir, "merge-base", head, trustedSHA); err == nil && strings.TrimSpace(base) != "" {
 		return strings.TrimSpace(base), nil

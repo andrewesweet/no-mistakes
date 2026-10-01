@@ -91,7 +91,7 @@ func newRerunCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&intent, "intent", "", "explicit intent for this rerun (overrides inherited intent or fresh inference)")
-	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch for the PR for this rerun only (overrides inherited per-run base branch)")
+	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "effective base branch for this rerun: rebase, PR, CI, and the scoping validation steps (Review, Test, Document, Lint, repository gates); overrides inherited per-run base branch")
 	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this rerun (adds to the inherited decision; tighten-only)")
 	bindPiProfileFlags(cmd, &model, &effort)
 	return cmd

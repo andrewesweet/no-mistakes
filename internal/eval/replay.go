@@ -294,10 +294,7 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 		source := c.IntentSource
 		replayRun.IntentSource = &source
 	}
-	defaultBranch := c.DefaultBranch
-	if defaultBranch == "" {
-		defaultBranch = "main"
-	}
+	defaultBranch := replayDefaultBranch(c)
 	replayRepo := &db.Repo{ID: "eval", WorkingPath: workDir, DefaultBranch: defaultBranch}
 	step := &steps.ReviewStep{}
 	outcome, err := step.Execute(&pipeline.StepContext{
@@ -389,7 +386,7 @@ func replayRoundContext(p *paths.Paths, c Case, workDir string) (*db.DB, string,
 		database.Close()
 		return nil, "", false, "", err
 	}
-	repo, err := database.InsertRepoWithID("eval-repo", workDir, "local://eval", c.DefaultBranch)
+	repo, err := database.InsertRepoWithID("eval-repo", workDir, "local://eval", replayDefaultBranch(c))
 	if err != nil {
 		return fail(fmt.Errorf("create isolated replay repository: %w", err))
 	}
@@ -453,10 +450,7 @@ func restoreCase(ctx context.Context, store *Store, c Case, root string) (string
 	if err := restoreCaseObjects(ctx, store.poolDir(c.RepoFingerprint), gateDir, c.ID); err != nil {
 		return "", err
 	}
-	defaultBranch := c.DefaultBranch
-	if defaultBranch == "" {
-		defaultBranch = "main"
-	}
+	defaultBranch := replayDefaultBranch(c)
 	if _, err := git.Run(ctx, gateDir, "update-ref", "refs/remotes/origin/"+defaultBranch, c.TrustedConfigSHA); err != nil {
 		return "", fmt.Errorf("restore trusted default branch: %w", err)
 	}
@@ -465,6 +459,13 @@ func restoreCase(ctx context.Context, store *Store, c Case, root string) (string
 		return "", fmt.Errorf("restore review worktree: %w", err)
 	}
 	return workDir, nil
+}
+
+func replayDefaultBranch(c Case) string {
+	if branch := strings.TrimSpace(c.DefaultBranch); branch != "" {
+		return branch
+	}
+	return "main"
 }
 
 func replayConfig(c Case) (*config.Config, error) {
@@ -480,6 +481,12 @@ func replayConfig(c Case) (*config.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load captured repo config: %w", err)
 	}
+	// Nothing here can tell whether the captured review scoped against a
+	// non-default base branch: the recorded effective pr.base_branch is the PR
+	// target, not the scoping base, and no manifest field records the scoping
+	// base. Capture refuses such a run (see capturedBaseBranch), so only a case
+	// stored before that guard can carry the mismatch, and it replays against
+	// the base the manifest recorded.
 	return config.Merge(global, repo), nil
 }
 

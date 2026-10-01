@@ -207,10 +207,14 @@ Select the branch that newly created pull requests target.
 | --- | --- |
 | Type | `string` |
 | Default | The repository's forge default branch |
-| Trust | Trusted default branch, unless `allow_repo_commands: true` is explicitly enabled there |
+| Trust | PR targeting and rebase: trusted default branch, unless `allow_repo_commands: true` is explicitly enabled there. Validation scoping: trusted default branch always |
 
 Use this when the repository's integration branch differs from its forge default branch, for example `develop` instead of `main`.
-The configured branch is used for PR creation, and as the integration base for the rebase step.
+The configured branch is used for PR creation, as the integration base for the rebase step, and as the scoping base for every validation step that works on the branch's changes: Review, Test, Document, Lint, and repository gate fixes.
+Scoping reads only the trusted default-branch value, even under `allow_repo_commands: true`: a pushed branch that could move the scoping base would hide its own commits from those gates and from trusted [`review.path_instructions`](#reviewpath_instructions) selection. The pushed value still targets the PR and the rebase under that opt-in.
+A per-run `--base-branch` outranks both, for scoping as well as targeting, because an operator supplies it.
+CI is the exception: once the PR exists its live forge base takes precedence (see below), so this setting only scopes CI repair when no PR record is available.
+Before any restart at Review from the CI step - a repair revalidation or an adopted head rewrite - that live forge base also replaces the run's persisted base, including a per-run `--base-branch`, so every validation step after the restart scopes against the branch the pull request actually targets (see [CI](/no-mistakes/reference/pipeline-steps/#ci)).
 When unset, no-mistakes preserves the existing behavior and targets `Repo.DefaultBranch`.
 
 PR lookup matches an existing PR by branch alone, never filtered by base, so a `pr.base_branch` change after a PR was opened updates that PR instead of opening a duplicate against the new base.

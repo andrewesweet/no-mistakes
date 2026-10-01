@@ -45,7 +45,9 @@ func (s *CustomGateStep) runFixTurn(sctx *pipeline.StepContext) (string, error) 
 	if !sctx.Fixing {
 		return "", nil
 	}
-	baseSHA, err := resolveBranchBaseSHA(sctx.Ctx, sctx, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	// Scoping follows the run's effective base branch (the one Rebase, PR and
+	// CI already use); see review.go for the stacked-layer rationale.
+	baseSHA, err := resolveBranchBaseSHA(sctx.Ctx, sctx, sctx.Run.BaseSHA, scopingBaseBranch(sctx))
 	if err != nil {
 		return "", err
 	}

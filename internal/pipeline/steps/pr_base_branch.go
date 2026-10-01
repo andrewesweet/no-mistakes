@@ -47,3 +47,20 @@ func runPRBaseBranch(sctx *pipeline.StepContext) string {
 	}
 	return strings.TrimSpace(*sctx.Run.PRBaseBranch)
 }
+
+// scopingBaseBranch resolves the base branch the validation steps scope their
+// diff against: the operator-supplied per-run override, else the TRUSTED
+// default-branch pr.base_branch, else the repository default. It deliberately
+// ignores the pushed branch's pr.base_branch even under allow_repo_commands,
+// because a pushed value would let a branch move the gate's own diff scope and
+// hide its commits from review, test, lint and trusted path-instruction
+// selection. PR targeting and rebase keep using effectivePRBaseBranch.
+func scopingBaseBranch(sctx *pipeline.StepContext) string {
+	if runBase := runPRBaseBranch(sctx); runBase != "" {
+		return runBase
+	}
+	if trustedBase := strings.TrimSpace(sctx.Config.PR.ScopingBaseBranch); trustedBase != "" {
+		return trustedBase
+	}
+	return repoDefaultBranch(sctx)
+}

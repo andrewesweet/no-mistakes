@@ -30,7 +30,12 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		return nil, err
 	}
 	ctx := sctx.Ctx
-	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	// Scoping follows the run's effective base branch - the one Rebase, PR and
+	// CI already use - so a stacked layer is reviewed against its parent branch
+	// and never re-reviews lower layers. Trusted material below still comes
+	// from the repository default branch.
+	baseBranch := scopingBaseBranch(sctx)
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +147,7 @@ Context:
 - base commit: %s
 - target commit: %s
 - review scope: %s
-- default branch: %s
+- base branch (scope base): %s
 - ignore patterns: %s
 
 Rules:
@@ -166,7 +171,7 @@ Previous review findings to address:
 			baseSHA,
 			sctx.Run.HeadSHA,
 			reviewScope,
-			sctx.Repo.DefaultBranch,
+			baseBranch,
 			ignorePatterns,
 			historySection,
 			previousFindings,
@@ -322,7 +327,7 @@ Context:
 - base commit: %s
 - target commit: %s
 - review scope: %s
-- default branch: %s
+- base branch (scope base): %s
 - ignore patterns: %s
 
 Task:
@@ -380,7 +385,7 @@ Risk assessment (after listing all findings):
 		baseSHA,
 		sctx.Run.HeadSHA,
 		reviewScope,
-		sctx.Repo.DefaultBranch,
+		baseBranch,
 		ignorePatterns,
 		reviewCoverageSection(reviewable),
 		historySection,

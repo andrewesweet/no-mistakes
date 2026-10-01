@@ -148,8 +148,11 @@ func newAxiRunCmd() *cobra.Command {
 			"reused disposition, full submitted head, and a digest of the exact\n" +
 			"persisted intent; raw intent is never included.\n\n" +
 			"--base-branch targets an integration branch other than the repository default\n" +
-			"for this run only (for example an epic branch). It overrides pr.base_branch\n" +
-			"in repo config and is persisted on the run for rebase, PR, and CI steps.\n\n" +
+			"for this run only (for example a stacked pull request's parent branch). It\n" +
+			"overrides pr.base_branch in repo config and is persisted on the run as the\n" +
+			"effective base for rebase, PR, and CI, and for every validation step that\n" +
+			"scopes its work to the branch's changes (Review, Test, Document, Lint, and\n" +
+			"repository gate fixes).\n\n" +
 			"--no-publish-intent keeps the generated public Intent section out of the\n" +
 			"PR body for this run. It is tighten-only: it can never publish intent on a\n" +
 			"repository whose trusted pr.publish_intent disabled it. The full intent\n" +
@@ -197,7 +200,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
 	cmd.Flags().StringVar(&launchNonce, "launch-nonce", "", "opaque nonce for a daemon-bound pre-drive launch receipt")
 	cmd.Flags().StringVar(&validationGeneration, "validation-generation", "", "opaque generation bound to --launch-nonce proof mode")
-	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch to open the PR against for this run only (overrides pr.base_branch)")
+	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "effective base branch for this run: rebase, PR, CI, and the scoping validation steps (Review, Test, Document, Lint, repository gates); overrides pr.base_branch")
 	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this run (tighten-only; full intent still reaches every step prompt except PR drafting)")
 	cmd.Flags().String("verification-plan", "", "capture a nonempty UTF-8 verification plan as separate run evidence (new runs only)")
 	bindAxiWaitFlag(cmd, &wait)
@@ -969,6 +972,16 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			}
 			if pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON) {
 				fmt.Fprintf(progress, "%s: unvalidated work in the run worktree requires an explicit response; --yes leaves this gate awaiting a response\n", gate.Name)
+				return run, false, nil
+			}
+			// The pull request branch moved to a head the run owns nowhere and
+			// the worktree holds commits nobody can attribute to it, so which
+			// head to validate is the operator's decision. Approving here would
+			// report checks for a head the run never validated - the outcome the
+			// park exists to prevent - and a fixer cannot rewrite history it was
+			// never handed.
+			if pipeline.HasCIHeadRewriteRefusal(gate.FindingsJSON) {
+				fmt.Fprintf(progress, "%s: the pull request branch moved to a head this run owns nowhere; --yes leaves this gate awaiting an explicit decision\n", gate.Name)
 				return run, false, nil
 			}
 			gateKey := gate.Name + "\x00" + gate.Status

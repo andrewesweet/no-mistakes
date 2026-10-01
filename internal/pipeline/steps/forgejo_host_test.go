@@ -66,7 +66,7 @@ func TestVerifyMergedProof_RequiresProofForExpectedHead(t *testing.T) {
 		HeadSHA: "unexpected",
 	}}
 
-	err := verifyMergedProof(context.Background(), host, pr, "expected")
+	_, err := verifyMergedProof(context.Background(), host, pr, []string{"expected"})
 	if !errors.Is(err, scm.ErrHeadChanged) {
 		t.Fatalf("verifyMergedProof() error = %v, want ErrHeadChanged", err)
 	}
@@ -75,7 +75,7 @@ func TestVerifyMergedProof_RequiresProofForExpectedHead(t *testing.T) {
 func TestVerifyMergedProof_RejectsIncompleteProof(t *testing.T) {
 	pr := &scm.PR{Number: "42", URL: "https://forge.example/octo/widgets/pulls/42"}
 	host := &mergedProofTestHost{proof: scm.MergedProof{Number: "42", URL: pr.URL, HeadSHA: "expected"}}
-	if err := verifyMergedProof(context.Background(), host, pr, "expected"); err == nil {
+	if _, err := verifyMergedProof(context.Background(), host, pr, []string{"expected"}); err == nil {
 		t.Fatal("verifyMergedProof() error = nil, want unmerged proof rejection")
 	}
 }
@@ -104,7 +104,11 @@ func (h *mergedProofTestHost) Capabilities() scm.Capabilities {
 	return scm.Capabilities{MergedProof: true}
 }
 
-func (h *mergedProofTestHost) GetMergedProof(_ context.Context, _ *scm.PR, expectedHead string) (scm.MergedProof, error) {
+func (h *mergedProofTestHost) GetMergedProof(_ context.Context, _ *scm.PR, ownHeads []string) (scm.MergedProof, error) {
+	expectedHead := ""
+	if len(ownHeads) > 0 {
+		expectedHead = ownHeads[0]
+	}
 	if h.err != nil {
 		return scm.MergedProof{}, h.err
 	}
