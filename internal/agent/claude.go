@@ -342,7 +342,7 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 				lastModel = msg.Model
 			}
 			usage.Add(TokenUsage{
-				InputTokens:           msg.Usage.InputTokens,
+				InputTokens:           msg.Usage.InputTokens + msg.Usage.CacheReadInputTokens + msg.Usage.CacheCreationInputTokens,
 				OutputTokens:          msg.Usage.OutputTokens,
 				CacheReadTokens:       msg.Usage.CacheReadInputTokens,
 				CacheCreationTokens:   msg.Usage.CacheCreationInputTokens,

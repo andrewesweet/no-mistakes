@@ -347,7 +347,7 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 			evaluation.InputTokens = int64(observed.usage.InputTokens)
 			evaluation.OutputTokens = int64(observed.usage.OutputTokens)
 			evaluation.CacheReadTokens = int64(observed.usage.CacheReadTokens)
-			evaluation.CacheWriteTokens = observed.cacheWriteTokens
+			evaluation.CacheWriteTokens = int64(observed.usage.CacheCreationTokens)
 			evaluation.FreshInputTokens = int64(observed.freshInputTokens)
 		}
 	}
@@ -495,11 +495,6 @@ type observedAgent struct {
 	// cost.
 	usage            agent.TokenUsage
 	freshInputTokens int
-	// cacheWriteTokens sums cache-creation across attempts. An adapter that
-	// does not report the field leaves the sum at zero, which the evaluation
-	// and report render as an absent cache-write segment rather than a
-	// fabricated write count.
-	cacheWriteTokens int64
 	usageMissing     bool
 	ownershipErr     error
 	mu               sync.Mutex
@@ -556,13 +551,8 @@ func (a *observedAgent) observeUsage(result *agent.Result) {
 		a.usageMissing = true
 		return
 	}
-	a.usage.InputTokens += result.Usage.InputTokens
-	a.usage.OutputTokens += result.Usage.OutputTokens
-	a.usage.CacheReadTokens += result.Usage.CacheReadTokens
-	if result.Usage.CacheCreationReported {
-		a.cacheWriteTokens += int64(result.Usage.CacheCreationTokens)
-	}
-	a.freshInputTokens += agent.FreshInputTokens(result.Usage.InputTokens, result.Usage.CacheReadTokens)
+	a.usage.Add(result.Usage)
+	a.freshInputTokens += agent.FreshInputTokens(result.Usage.InputTokens, result.Usage.CacheReadTokens+result.Usage.CacheCreationTokens)
 }
 
 func findingCount(raw string) int {

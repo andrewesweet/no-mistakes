@@ -125,20 +125,61 @@ CREATE TABLE IF NOT EXISTS diversified_pins (
 			return fmt.Errorf("migrate eval replay reservations: %w", err)
 		}
 	}
-	// Cache token columns arrived after the first registries shipped. Existing
-	// histories predate provider cache accounting, so they default to zero;
-	// the report renders those rows without a cache segment instead of
-	// implying an unmeasured replay spent none.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin eval cache migration: %w", err)
+	}
+	defer tx.Rollback()
+	cacheColumnsAdded := false
 	for _, column := range []string{"cache_read_tokens", "cache_write_tokens"} {
 		var cacheTokenColumn int
-		if err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_info('evaluations') WHERE name = ?`, column).Scan(&cacheTokenColumn); err != nil {
+		if err := tx.QueryRow(`SELECT count(*) FROM pragma_table_info('evaluations') WHERE name = ?`, column).Scan(&cacheTokenColumn); err != nil {
 			return fmt.Errorf("inspect eval evaluation schema: %w", err)
 		}
 		if cacheTokenColumn == 0 {
-			if _, err := s.db.Exec(`ALTER TABLE evaluations ADD COLUMN ` + column + ` INTEGER NOT NULL DEFAULT 0`); err != nil {
+			if _, err := tx.Exec(`ALTER TABLE evaluations ADD COLUMN ` + column + ` INTEGER NOT NULL DEFAULT 0`); err != nil {
 				return fmt.Errorf("migrate eval evaluation schema: %w", err)
 			}
+			cacheColumnsAdded = true
 		}
+	}
+	if cacheColumnsAdded {
+		rows, err := tx.Query(`SELECT path FROM evaluations`)
+		if err != nil {
+			return fmt.Errorf("list eval cache payloads: %w", err)
+		}
+		var paths []string
+		for rows.Next() {
+			var path string
+			if err := rows.Scan(&path); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan eval cache payload: %w", err)
+			}
+			paths = append(paths, path)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("list eval cache payloads: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close eval cache payloads: %w", err)
+		}
+		for _, path := range paths {
+			var evaluation Evaluation
+			if err := readJSON(path, &evaluation); err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return fmt.Errorf("read eval cache payload: %w", err)
+			}
+			if _, err := tx.Exec(`UPDATE evaluations SET cache_read_tokens = ?, cache_write_tokens = ? WHERE path = ?`,
+				evaluation.CacheReadTokens, evaluation.CacheWriteTokens, path); err != nil {
+				return fmt.Errorf("backfill eval cache tokens: %w", err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit eval cache migration: %w", err)
 	}
 	return nil
 }

@@ -375,7 +375,7 @@ func TestBaselineForRoundIncludesOnlyCompleteReviewInvocationMetrics(t *testing.
 	}
 }
 
-func TestScoreCandidateMatchesSameFindingID(t *testing.T) {
+func TestScoreCandidateDoesNotMatchSameFindingIDAlone(t *testing.T) {
 	labels := Labels{Findings: []FindingGold{{
 		ID:          "error-handling",
 		Kind:        GoldTruePositive,
@@ -385,14 +385,14 @@ func TestScoreCandidateMatchesSameFindingID(t *testing.T) {
 	candidate := `{"findings":[{"id":"error-handling","file":"new.go","description":"drops a database error"}]}`
 
 	score := ScoreCandidate(labels, candidate)
-	if score.TruePositive != 1 || score.FalseNegative != 0 || score.Pending != 0 {
-		t.Fatalf("score = %#v, want same finding ID matched", score)
+	if score.TruePositive != 0 || score.FalseNegative != 1 || score.Pending != 1 {
+		t.Fatalf("score = %#v, want unrelated findings with the same ID left unmatched", score)
 	}
 }
 
 func TestScoreCandidateMatchesNormalizedFileAndDescription(t *testing.T) {
-	labels := Labels{Findings: []FindingGold{{ID: "review-1", Kind: GoldTruePositive, File: " internal/eval/score.go ", Description: "Drops   an HTTP Error"}}}
-	candidate := `{"findings":[{"id":"different","file":"internal/eval/score.go","description":"drops an http error"}]}`
+	labels := Labels{Findings: []FindingGold{{ID: "review-1", Kind: GoldTruePositive, File: " internal/eval/score.go ", Line: 10, Description: "Drops   an HTTP Error"}}}
+	candidate := `{"findings":[{"id":"different","file":"internal/eval/score.go","line":12,"description":"drops an http error"}]}`
 
 	score := ScoreCandidate(labels, candidate)
 	if score.TruePositive != 1 || score.FalseNegative != 0 || score.Pending != 0 {

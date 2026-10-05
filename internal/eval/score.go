@@ -9,22 +9,12 @@ import (
 )
 
 const (
-	matchExactID     = "exact-id"
-	matchExactText   = "exact-text"
-	matchLocation    = "location"
-	matchContainment = "containment"
-	locationLineBand = 3
-	// locationJaccardMin gates the location tier's semantic half. It is
-	// calibrated on replay pairs whose same-defect paraphrases scored 0.20-0.41
-	// under similarityTokens while same-file different-defect pairs within the
-	// line band scored at most 0.15: independent reviews word the same defect
-	// very differently, so the gate must tolerate paraphrase while still
-	// refusing defects that share only a function's surrounding vocabulary.
-	// The prior 0.5 threshold demanded near-literal word overlap and scored
-	// every independently worded replay finding as a miss (auto recall read 0
-	// for replays that re-found gold bugs at the exact file and line).
-	locationJaccardMin   = 0.2
-	containmentMinTokens = 8
+	matchExactText            = "exact-text"
+	matchLocation             = "location"
+	locationLineBand          = 3
+	locationJaccardMin        = 0.5
+	paraphraseJaccardMin      = 0.2
+	paraphraseMinSharedTokens = 8
 )
 
 // Score is one candidate's finding-level confusion matrix against gold.
@@ -48,8 +38,8 @@ type Score struct {
 //   - FP: only an explicit false-positive gold that the candidate still raised
 //   - Pending: unmatched candidate findings, never inferred as invalid
 //
-// Matching is a documented cascade of strengths: exact-id, exact-text,
-// nearby-line Jaccard, then gated containment. Assignment is one globally
+// Matching is a documented cascade of strengths: exact-text and nearby-line
+// similarity. Assignment is one globally
 // optimal assignment over the whole graph (see assignMatches), so neither
 // candidate ordering nor a tier boundary can consume a candidate another gold
 // needed. Headline recall uses the full cascade; exact vs fuzzy counts are
@@ -67,7 +57,7 @@ func ScoreCandidate(labels Labels, findingsJSON string) Score {
 		switch {
 		case isTrueIssueGold(gold.Kind) && match.cand >= 0:
 			score.TruePositive++
-			if match.strength == matchExactID || match.strength == matchExactText {
+			if match.strength == matchExactText {
 				score.TruePositiveExact++
 			} else {
 				score.TruePositiveFuzzy++
@@ -120,8 +110,8 @@ type assignedMatch struct {
 // than every possible combination of weaker pairs (weightFor scales each tier by
 // a base larger than any achievable count), so the optimum never trades one
 // exact match for two fuzzy ones, and among the assignments with the most exact
-// pairs it takes the one with the most location pairs, then the most containment
-// pairs. hungarianMinCost solves that max-weight assignment exactly.
+// pairs it takes the one with the most location pairs.
+// hungarianMinCost solves that max-weight assignment exactly.
 func assignMatches(golds []FindingGold, candidate []types.Finding) []assignedMatch {
 	out := make([]assignedMatch, len(golds))
 	for i := range out {
@@ -137,7 +127,7 @@ func assignMatches(golds []FindingGold, candidate []types.Finding) []assignedMat
 		weight[gi] = make([]int64, len(candidate))
 		strength[gi] = make([]string, len(candidate))
 		for ci, finding := range candidate {
-			for _, s := range []string{matchExactID, matchExactText, matchLocation, matchContainment} {
+			for _, s := range []string{matchExactText, matchLocation} {
 				if matchAt(gold, finding, s) {
 					weight[gi][ci] = weightFor(s, base)
 					strength[gi][ci] = s
@@ -163,12 +153,10 @@ func assignMatches(golds []FindingGold, candidate []types.Finding) []assignedMat
 // the per-strength counts.
 func weightFor(strength string, base int64) int64 {
 	switch strength {
-	case matchExactID, matchExactText:
+	case matchExactText:
 		return base * base
 	case matchLocation:
 		return base
-	case matchContainment:
-		return 1
 	default:
 		return 0
 	}
@@ -290,30 +278,6 @@ func hungarianMinCost(cost [][]int64) []int {
 }
 
 func matchAt(gold FindingGold, finding types.Finding, strength string) bool {
-	switch strength {
-	case matchExactID:
-		return gold.ID != "" && gold.ID == finding.ID
-	case matchExactText:
-		return exactTextMatch(gold, finding)
-	case matchLocation:
-		return locationMatch(gold, finding)
-	case matchContainment:
-		return containmentMatch(gold, finding)
-	default:
-		return false
-	}
-}
-
-func exactTextMatch(gold FindingGold, finding types.Finding) bool {
-	goldFile, goldDesc := normalizeIssue(gold.File, gold.Description)
-	candFile, candDesc := normalizeIssue(finding.File, finding.Description)
-	if goldFile == "" || candFile == "" || goldDesc == "" || candDesc == "" {
-		return false
-	}
-	return goldFile == candFile && goldDesc == candDesc
-}
-
-func locationMatch(gold FindingGold, finding types.Finding) bool {
 	goldFile, goldDesc := normalizeIssue(gold.File, gold.Description)
 	candFile, candDesc := normalizeIssue(finding.File, finding.Description)
 	if goldFile == "" || candFile == "" || goldDesc == "" || candDesc == "" {
@@ -325,34 +289,19 @@ func locationMatch(gold FindingGold, finding types.Finding) bool {
 	if absInt(gold.Line-finding.Line) > locationLineBand {
 		return false
 	}
-	return tokenJaccard(goldDesc, candDesc) >= locationJaccardMin
+	switch strength {
+	case matchExactText:
+		return strings.EqualFold(goldDesc, candDesc)
+	case matchLocation:
+		return similarDescriptions(goldDesc, candDesc)
+	default:
+		return false
+	}
 }
 
-func containmentMatch(gold FindingGold, finding types.Finding) bool {
-	goldFile, goldDesc := normalizeIssue(gold.File, gold.Description)
-	candFile, candDesc := normalizeIssue(finding.File, finding.Description)
-	if goldFile == "" || candFile == "" || goldDesc == "" || candDesc == "" || goldFile != candFile {
-		return false
-	}
-	if goldDesc == candDesc {
-		return false
-	}
-	shorter, longer := goldDesc, candDesc
-	if len(candDesc) < len(goldDesc) {
-		shorter, longer = candDesc, goldDesc
-	}
-	if !strings.Contains(longer, shorter) {
-		return false
-	}
-	return len(strings.Fields(shorter)) >= containmentMinTokens
-}
-
-func tokenJaccard(a, b string) float64 {
+func similarDescriptions(a, b string) bool {
 	left := similarityTokens(a)
 	right := similarityTokens(b)
-	if len(left) == 0 && len(right) == 0 {
-		return 0
-	}
 	inter := 0
 	for tok := range left {
 		if right[tok] {
@@ -361,9 +310,11 @@ func tokenJaccard(a, b string) float64 {
 	}
 	union := len(left) + len(right) - inter
 	if union == 0 {
-		return 0
+		return false
 	}
-	return float64(inter) / float64(union)
+	similarity := float64(inter) / float64(union)
+	return similarity >= locationJaccardMin ||
+		(inter >= paraphraseMinSharedTokens && similarity >= paraphraseJaccardMin)
 }
 
 // similarityTokens normalizes a finding description into the vocabulary the
@@ -375,7 +326,7 @@ func tokenJaccard(a, b string) float64 {
 // semantic gate needs; literal whitespace tokens tied the gate to wording.
 func similarityTokens(description string) map[string]bool {
 	out := map[string]bool{}
-	for _, field := range strings.Fields(strings.ToLower(description)) {
+	for _, field := range strings.Fields(description) {
 		for _, word := range splitIdentifierWords(field) {
 			if len(word) > 1 && !similarityStopword(word) {
 				out[word] = true
@@ -463,7 +414,7 @@ func similarityStopword(word string) bool { return similarityStopwords[word] }
 
 func normalizeIssue(file, description string) (string, string) {
 	file = filepath.ToSlash(strings.TrimSpace(file))
-	description = strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(description))), " ")
+	description = strings.Join(strings.Fields(description), " ")
 	return file, description
 }
 

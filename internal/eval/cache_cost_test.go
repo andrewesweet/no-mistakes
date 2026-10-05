@@ -42,7 +42,7 @@ func TestPersistEvaluationRecordsCacheTokens(t *testing.T) {
 		Repeat:           1,
 		Status:           "completed",
 		TokensReported:   true,
-		InputTokens:      556,
+		InputTokens:      2_934_600,
 		OutputTokens:     1475,
 		CacheReadTokens:  2_921_704,
 		CacheWriteTokens: 12_340,
@@ -115,6 +115,23 @@ VALUES ('old-eval', 'session', 'case-old', 'claude+test', 1, 1, 2, 'completed', 
 	if err != nil {
 		t.Fatalf("seed legacy registry: %v", err)
 	}
+	legacyPath := filepath.Join(root, "legacy-evaluation.json")
+	if err := os.WriteFile(legacyPath, []byte(`{"cache_read_tokens":2921704}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE evaluations SET path = ? WHERE id = 'old-eval'`, legacyPath); err != nil {
+		t.Fatal(err)
+	}
+	withWritesPath := filepath.Join(root, "evaluation-with-writes.json")
+	if err := writeJSON(withWritesPath, Evaluation{CacheReadTokens: 200, CacheWriteTokens: 300}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO evaluations SELECT 'with-writes', session_id, case_id, candidate, repeat_number, started_at, completed_at, status, gold_count, true_positive, false_negative, false_positive, pending, tokens_reported, input_tokens, output_tokens, fresh_input_tokens, duration_ms, ? FROM evaluations WHERE id = 'old-eval'`, withWritesPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO evaluations SELECT 'missing-payload', session_id, case_id, candidate, repeat_number, started_at, completed_at, status, gold_count, true_positive, false_negative, false_positive, pending, tokens_reported, input_tokens, output_tokens, fresh_input_tokens, duration_ms, ? FROM evaluations WHERE id = 'old-eval'`, filepath.Join(root, "missing.json")); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +140,7 @@ VALUES ('old-eval', 'session', 'case-old', 'claude+test', 1, 1, 2, 'completed', 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	for _, column := range []string{"cache_read_tokens", "cache_write_tokens"} {
 		var found int
@@ -136,14 +153,34 @@ VALUES ('old-eval', 'session', 'case-old', 'claude+test', 1, 1, 2, 'completed', 
 			t.Fatalf("migrated evaluations table lacks the %s column", column)
 		}
 	}
-	var input, cacheRead int64
-	if err := store.db.QueryRow(
-		`SELECT input_tokens, COALESCE(cache_read_tokens, -1) FROM evaluations WHERE id = 'old-eval'`,
-	).Scan(&input, &cacheRead); err != nil {
-		t.Fatalf("legacy row unreadable after migration: %v", err)
-	}
-	if input != 10 || cacheRead != 0 {
-		t.Fatalf("legacy row = input %d cache-read %d, want input 10 cache-read defaulted to 0", input, cacheRead)
+	for attempt := 0; attempt < 2; attempt++ {
+		for _, tc := range []struct {
+			id          string
+			read, write int64
+		}{
+			{"old-eval", 2_921_704, 0},
+			{"with-writes", 200, 300},
+			{"missing-payload", 0, 0},
+		} {
+			var input, cacheRead, cacheWrite int64
+			if err := store.db.QueryRow(
+				`SELECT input_tokens, cache_read_tokens, cache_write_tokens FROM evaluations WHERE id = ?`, tc.id,
+			).Scan(&input, &cacheRead, &cacheWrite); err != nil {
+				t.Fatalf("legacy row unreadable after migration: %v", err)
+			}
+			if input != 10 || cacheRead != tc.read || cacheWrite != tc.write {
+				t.Fatalf("%s: input %d cache-read %d cache-write %d, want 10/%d/%d", tc.id, input, cacheRead, cacheWrite, tc.read, tc.write)
+			}
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if attempt == 0 {
+			store, err = Open(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 }
 
@@ -164,8 +201,8 @@ func TestObservedAgentSumsCacheWriteTokens(t *testing.T) {
 	if _, err := observed.Run(context.Background(), agent.RunOpts{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if observed.cacheWriteTokens != 5_000 {
-		t.Fatalf("cache-write sum = %d, want 5000 across both attempts", observed.cacheWriteTokens)
+	if observed.usage.CacheCreationTokens != 5_000 {
+		t.Fatalf("cache-write sum = %d, want 5000 across both attempts", observed.usage.CacheCreationTokens)
 	}
 
 	unreported := &observedAgent{inner: &retryingAgent{
@@ -174,15 +211,45 @@ func TestObservedAgentSumsCacheWriteTokens(t *testing.T) {
 	if _, err := unreported.Run(context.Background(), agent.RunOpts{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if unreported.cacheWriteTokens != 2_000 {
-		t.Fatalf("cache-write sum = %d, want only the attempt that reported cache creation", unreported.cacheWriteTokens)
+	if unreported.usage.CacheCreationTokens != 2_000 {
+		t.Fatalf("cache-write sum = %d, want only the attempt that reported cache creation", unreported.usage.CacheCreationTokens)
 	}
 }
 
-// reportForEvaluations drives the real report path: every evaluation is
+func TestObservedAgentCountsEachTokenBucketOnce(t *testing.T) {
+	usage := &agent.Result{
+		Usage: agent.TokenUsage{InputTokens: 31_000, OutputTokens: 500, CacheReadTokens: 20_000,
+			CacheCreationTokens: 1_000, Reported: true, CacheCreationReported: true},
+		UsageReported: true,
+	}
+	for _, tc := range []struct {
+		name     string
+		inner    agent.Agent
+		attempts int64
+	}{
+		{"returned usage", &fixedResultAgent{result: usage}, 1},
+		{"retried usage", &retryingAgent{attempts: []*agent.Result{usage, usage}}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			observed := &observedAgent{inner: tc.inner}
+			if _, err := observed.Run(context.Background(), agent.RunOpts{}); err != nil {
+				t.Fatal(err)
+			}
+			rows := []Evaluation{{TokensReported: !observed.usageMissing,
+				FreshInputTokens: int64(observed.freshInputTokens), OutputTokens: int64(observed.usage.OutputTokens),
+				CacheReadTokens: int64(observed.usage.CacheReadTokens), CacheWriteTokens: int64(observed.usage.CacheCreationTokens)}}
+			total, reads, writes, ok := averageTokens(rows)
+			if !ok || total != float64(31_500*tc.attempts) || reads != float64(20_000*tc.attempts) || writes != float64(1_000*tc.attempts) || rows[0].FreshInputTokens != 10_000*tc.attempts {
+				t.Fatalf("cost = %v/%v/%v fresh %d reported %v", total, reads, writes, rows[0].FreshInputTokens, ok)
+			}
+		})
+	}
+}
+
+// reportsForEvaluations drives the real report path: every evaluation is
 // persisted through the store (JSON payload plus registry row) exactly as a
 // replay persists one, then rendered.
-func reportForEvaluations(t *testing.T, evaluations []Evaluation) string {
+func reportsForEvaluations(t *testing.T, evaluations []Evaluation) []CandidateReport {
 	t.Helper()
 	store, err := Open(t.TempDir())
 	if err != nil {
@@ -214,7 +281,7 @@ func reportForEvaluations(t *testing.T, evaluations []Evaluation) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return RenderReport(reports)
+	return reports
 }
 
 // TestRenderReportIncludesCacheTokensInTokenCost pins the report's token
@@ -224,24 +291,22 @@ func reportForEvaluations(t *testing.T, evaluations []Evaluation) string {
 func TestRenderReportIncludesCacheTokensInTokenCost(t *testing.T) {
 	evaluations := []Evaluation{{
 		Candidate: "claude+test", Status: "completed", TokensReported: true,
-		InputTokens: 70, OutputTokens: 184, CacheReadTokens: 2_921_704, CacheWriteTokens: 12_340,
+		InputTokens: 2_934_114, OutputTokens: 184, CacheReadTokens: 2_921_704, CacheWriteTokens: 12_340,
 		FreshInputTokens: 70, DurationMS: 1000,
 	}}
-	output := reportForEvaluations(t, evaluations)
-	if !strings.Contains(output, "cache-read") {
-		t.Fatalf("report = %q, want cache-read tokens in the token cost line", output)
-	}
-	if !strings.Contains(output, "cache-write") {
-		t.Fatalf("report = %q, want cache-write tokens in the token cost line", output)
+	output := RenderReport(reportsForEvaluations(t, evaluations))
+	want := "token cost: 254 fresh-input + output + 2921704 cache-read + 12340 cache-write = 2934298 tokens per reported replay"
+	if !strings.Contains(output, want) {
+		t.Fatalf("report = %q, want %q", output, want)
 	}
 
 	// A candidate whose agent never reports cache keeps the historical line
 	// instead of printing fabricated zeros.
 	legacy := []Evaluation{{
 		Candidate: "pi+test", Status: "completed", TokensReported: true,
-		InputTokens: 90, OutputTokens: 40, FreshInputTokens: 60, DurationMS: 1000,
+		InputTokens: 60, OutputTokens: 40, FreshInputTokens: 60, DurationMS: 1000,
 	}}
-	legacyOutput := reportForEvaluations(t, legacy)
+	legacyOutput := RenderReport(reportsForEvaluations(t, legacy))
 	if strings.Contains(legacyOutput, "cache-read") {
 		t.Fatalf("report = %q, want no cache segment when no replay reported cache tokens", legacyOutput)
 	}
@@ -250,19 +315,49 @@ func TestRenderReportIncludesCacheTokensInTokenCost(t *testing.T) {
 	}
 }
 
+func TestRenderReportCacheSegmentsAddToTotal(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		reads, writes int64
+		want          string
+	}{
+		{"read only", 20, 0, "12 fresh-input + output + 20 cache-read = 32 tokens per reported replay"},
+		{"write only", 0, 30, "12 fresh-input + output + 30 cache-write = 42 tokens per reported replay"},
+		{"both", 20, 30, "12 fresh-input + output + 20 cache-read + 30 cache-write = 62 tokens per reported replay"},
+		{"neither", 0, 0, "12 fresh-input + output tokens per reported replay"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reports := reportsForEvaluations(t, []Evaluation{{Candidate: "test", Status: "completed", TokensReported: true,
+				InputTokens: 10 + tc.reads + tc.writes, FreshInputTokens: 10, OutputTokens: 2, CacheReadTokens: tc.reads, CacheWriteTokens: tc.writes}})
+			output := RenderReport(reports)
+			if !strings.Contains(output, tc.want) {
+				t.Fatalf("report = %q, want %q", output, tc.want)
+			}
+		})
+	}
+	total, writes := 42.0, 30.0
+	output := RenderReport([]CandidateReport{{AverageTokens: &total, AverageCacheWriteTokens: &writes}})
+	if !strings.Contains(output, "12 fresh-input + output + 30 cache-write = 42 tokens per reported replay") {
+		t.Fatalf("write-only report = %q", output)
+	}
+}
+
 // TestRenderReportFrontierRanksOnTrueCost proves the frontier compares the
 // cache-inclusive total: an arm burning millions of cache-read tokens must
 // not read as cheaper than one that spent them honestly.
 func TestRenderReportFrontierRanksOnTrueCost(t *testing.T) {
 	cacheHeavy := Evaluation{Candidate: "cache-heavy", Status: "completed", TokensReported: true,
-		InputTokens: 70, OutputTokens: 184, CacheReadTokens: 2_921_704, FreshInputTokens: 70, DurationMS: 1000, HasFindingGold: true, GoldCount: 2, TruePositive: 2}
+		InputTokens: 2_921_774, OutputTokens: 184, CacheReadTokens: 2_921_704, FreshInputTokens: 70, DurationMS: 1000, HasFindingGold: true, GoldCount: 2, TruePositive: 2}
 	freshHeavy := Evaluation{Candidate: "fresh-heavy", Status: "completed", TokensReported: true,
 		InputTokens: 1_500_000, OutputTokens: 40_000, FreshInputTokens: 1_500_000, DurationMS: 1000, HasFindingGold: true, GoldCount: 2, TruePositive: 2}
-	output := reportForEvaluations(t, []Evaluation{cacheHeavy, freshHeavy})
-	// cache-heavy: 2,921,958 total tokens vs fresh-heavy: 1,540,000. The
-	// cache-inclusive total must dominate the fresh-only total, so cache-heavy
-	// sits on the frontier and fresh-heavy does not.
-	if !strings.Contains(output, "recall-vs-cost frontier: true") {
-		t.Fatalf("report = %q, want cache-heavy (the cache-inclusive total) on the frontier", output)
+	reports := reportsForEvaluations(t, []Evaluation{cacheHeavy, freshHeavy})
+	if len(reports) != 2 {
+		t.Fatalf("reports = %#v, want both candidates", reports)
+	}
+	if reports[0].Summary.Candidate != "cache-heavy" || reports[0].OnFrontier {
+		t.Fatalf("cache-heavy report = %#v, want outside frontier", reports[0])
+	}
+	if reports[1].Summary.Candidate != "fresh-heavy" || !reports[1].OnFrontier {
+		t.Fatalf("fresh-heavy report = %#v, want on frontier", reports[1])
 	}
 }

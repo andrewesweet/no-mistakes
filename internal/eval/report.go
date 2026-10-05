@@ -434,16 +434,21 @@ func RenderReport(reports []CandidateReport) string {
 		if report.AverageTokens == nil {
 			b.WriteString("  token cost: unknown (token usage was not reported for every replay)\n")
 		} else {
-			// Without reported cache the line stays byte-identical to the
-			// historical rendering, so historical reports still diff clean.
-			line := fmt.Sprintf("  token cost: %.0f fresh-input + output", *report.AverageTokens)
-			if report.AverageCacheReadTokens != nil && *report.AverageCacheReadTokens > 0 {
-				line += fmt.Sprintf(" + %.0f cache-read", *report.AverageCacheReadTokens)
+			cacheRead, cacheWrite := 0.0, 0.0
+			if report.AverageCacheReadTokens != nil {
+				cacheRead = *report.AverageCacheReadTokens
 			}
-			if report.AverageCacheWriteTokens != nil && *report.AverageCacheWriteTokens > 0 {
-				line += fmt.Sprintf(" + %.0f cache-write", *report.AverageCacheWriteTokens)
+			if report.AverageCacheWriteTokens != nil {
+				cacheWrite = *report.AverageCacheWriteTokens
 			}
-			if report.AverageCacheReadTokens != nil && (*report.AverageCacheReadTokens > 0 || *report.AverageCacheWriteTokens > 0) {
+			line := fmt.Sprintf("  token cost: %.0f fresh-input + output", *report.AverageTokens-cacheRead-cacheWrite)
+			if cacheRead > 0 {
+				line += fmt.Sprintf(" + %.0f cache-read", cacheRead)
+			}
+			if cacheWrite > 0 {
+				line += fmt.Sprintf(" + %.0f cache-write", cacheWrite)
+			}
+			if cacheRead > 0 || cacheWrite > 0 {
 				line += fmt.Sprintf(" = %.0f tokens per reported replay\n", *report.AverageTokens)
 			} else {
 				line += " tokens per reported replay\n"
