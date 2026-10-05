@@ -17,13 +17,20 @@ type Interval struct {
 
 // CandidateReport is one locally observed candidate slice.
 type CandidateReport struct {
-	Cohort        string
-	Summary       EvaluationSummary
-	RepeatCount   int
-	Confidence    *Interval
-	AverageTokens *float64
-	AverageWallMS float64
-	OnFrontier    bool
+	Cohort      string
+	Summary     EvaluationSummary
+	RepeatCount int
+	Confidence  *Interval
+	// AverageTokens is the honest per-replay total: fresh-input + output plus
+	// cache-read and cache-write where the adapter reported them. Cache reads
+	// dominate review cost by orders of magnitude, so ranking the
+	// recall-vs-cost frontier on fresh input alone would crown whichever
+	// provider cached hardest as cheapest.
+	AverageTokens           *float64
+	AverageCacheReadTokens  *float64
+	AverageCacheWriteTokens *float64
+	AverageWallMS           float64
+	OnFrontier              bool
 }
 
 // Report loads every local evaluation result grouped by candidate. It never
@@ -54,8 +61,10 @@ func Report(store *Store) ([]CandidateReport, error) {
 			Confidence:    confidenceInterval(candidate, rows),
 			AverageWallMS: averageWallMS(rows),
 		}
-		if cost, ok := averageTokens(rows); ok {
-			report.AverageTokens = &cost
+		if total, cacheRead, cacheWrite, ok := averageTokens(rows); ok {
+			report.AverageTokens = &total
+			report.AverageCacheReadTokens = &cacheRead
+			report.AverageCacheWriteTokens = &cacheWrite
 		}
 		reports = append(reports, report)
 	}
@@ -115,18 +124,21 @@ func averageWallMS(rows []Evaluation) float64 {
 	return float64(total) / float64(len(rows))
 }
 
-func averageTokens(rows []Evaluation) (float64, bool) {
+func averageTokens(rows []Evaluation) (total, cacheRead, cacheWrite float64, ok bool) {
 	if len(rows) == 0 {
-		return 0, false
+		return 0, 0, 0, false
 	}
-	var total int64
+	var freshAndOutput, reads, writes int64
 	for _, row := range rows {
 		if !row.TokensReported {
-			return 0, false
+			return 0, 0, 0, false
 		}
-		total += row.FreshInputTokens + row.OutputTokens
+		freshAndOutput += row.FreshInputTokens + row.OutputTokens
+		reads += row.CacheReadTokens
+		writes += row.CacheWriteTokens
 	}
-	return float64(total) / float64(len(rows)), true
+	n := float64(len(rows))
+	return float64(freshAndOutput+reads+writes) / n, float64(reads) / n, float64(writes) / n, true
 }
 
 func confidenceInterval(_ string, rows []Evaluation) *Interval {
@@ -422,7 +434,21 @@ func RenderReport(reports []CandidateReport) string {
 		if report.AverageTokens == nil {
 			b.WriteString("  token cost: unknown (token usage was not reported for every replay)\n")
 		} else {
-			fmt.Fprintf(&b, "  token cost: %.0f fresh-input + output tokens per reported replay\n", *report.AverageTokens)
+			// Without reported cache the line stays byte-identical to the
+			// historical rendering, so historical reports still diff clean.
+			line := fmt.Sprintf("  token cost: %.0f fresh-input + output", *report.AverageTokens)
+			if report.AverageCacheReadTokens != nil && *report.AverageCacheReadTokens > 0 {
+				line += fmt.Sprintf(" + %.0f cache-read", *report.AverageCacheReadTokens)
+			}
+			if report.AverageCacheWriteTokens != nil && *report.AverageCacheWriteTokens > 0 {
+				line += fmt.Sprintf(" + %.0f cache-write", *report.AverageCacheWriteTokens)
+			}
+			if report.AverageCacheReadTokens != nil && (*report.AverageCacheReadTokens > 0 || *report.AverageCacheWriteTokens > 0) {
+				line += fmt.Sprintf(" = %.0f tokens per reported replay\n", *report.AverageTokens)
+			} else {
+				line += " tokens per reported replay\n"
+			}
+			b.WriteString(line)
 		}
 		fmt.Fprintf(&b, "  wall time: %.1fs average\n", report.AverageWallMS/1000)
 		if report.AverageTokens != nil {

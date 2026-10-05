@@ -125,6 +125,21 @@ CREATE TABLE IF NOT EXISTS diversified_pins (
 			return fmt.Errorf("migrate eval replay reservations: %w", err)
 		}
 	}
+	// Cache token columns arrived after the first registries shipped. Existing
+	// histories predate provider cache accounting, so they default to zero;
+	// the report renders those rows without a cache segment instead of
+	// implying an unmeasured replay spent none.
+	for _, column := range []string{"cache_read_tokens", "cache_write_tokens"} {
+		var cacheTokenColumn int
+		if err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_info('evaluations') WHERE name = ?`, column).Scan(&cacheTokenColumn); err != nil {
+			return fmt.Errorf("inspect eval evaluation schema: %w", err)
+		}
+		if cacheTokenColumn == 0 {
+			if _, err := s.db.Exec(`ALTER TABLE evaluations ADD COLUMN ` + column + ` INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("migrate eval evaluation schema: %w", err)
+			}
+		}
+	}
 	return nil
 }
 
