@@ -82,7 +82,7 @@ func (s *Store) evaluations() ([]Evaluation, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("eval registry is closed")
 	}
-	rows, err := s.db.Query(`SELECT path FROM evaluations ORDER BY completed_at, id`)
+	rows, err := s.db.Query(`SELECT path, input_tokens, fresh_input_tokens, cache_read_tokens, cache_write_tokens FROM evaluations ORDER BY completed_at, id`)
 	if err != nil {
 		return nil, fmt.Errorf("list eval results: %w", err)
 	}
@@ -90,13 +90,18 @@ func (s *Store) evaluations() ([]Evaluation, error) {
 	var result []Evaluation
 	for rows.Next() {
 		var path string
-		if err := rows.Scan(&path); err != nil {
+		var input, fresh, cacheRead, cacheWrite int64
+		if err := rows.Scan(&path, &input, &fresh, &cacheRead, &cacheWrite); err != nil {
 			return nil, fmt.Errorf("scan eval result: %w", err)
 		}
 		var evaluation Evaluation
 		if err := readJSON(path, &evaluation); err != nil {
 			return nil, fmt.Errorf("read eval result: %w", err)
 		}
+		evaluation.InputTokens = input
+		evaluation.FreshInputTokens = fresh
+		evaluation.CacheReadTokens = cacheRead
+		evaluation.CacheWriteTokens = cacheWrite
 		result = append(result, evaluation)
 	}
 	if err := rows.Err(); err != nil {

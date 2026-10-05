@@ -3,6 +3,7 @@ package eval
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,16 +63,13 @@ func TestPersistEvaluationRecordsCacheTokens(t *testing.T) {
 	}
 }
 
-// TestStoreMigrationAddsCacheTokenColumnsForward opens a registry created by
-// an older binary (evaluations without cache columns and one row already in
-// it) and proves the migration adds the columns without disturbing the row,
-// so existing histories stay readable and new rows persist cleanly.
-func TestStoreMigrationAddsCacheTokenColumnsForward(t *testing.T) {
-	root := t.TempDir()
+func openLegacyEvaluationRegistry(t *testing.T, root string) *sql.DB {
+	t.Helper()
 	db, err := sql.Open("sqlite", filepath.Join(root, "registry.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = db.Close() })
 	_, err = db.Exec(`
 CREATE TABLE cases (
     id TEXT PRIMARY KEY,
@@ -115,6 +113,16 @@ VALUES ('old-eval', 'session', 'case-old', 'claude+test', 1, 1, 2, 'completed', 
 	if err != nil {
 		t.Fatalf("seed legacy registry: %v", err)
 	}
+	return db
+}
+
+// TestStoreMigrationAddsCacheTokenColumnsForward opens a registry created by
+// an older binary (evaluations without cache columns and one row already in
+// it) and proves the migration adds the columns without losing the row,
+// so existing histories stay readable and new rows persist cleanly.
+func TestStoreMigrationAddsCacheTokenColumnsForward(t *testing.T) {
+	root := t.TempDir()
+	db := openLegacyEvaluationRegistry(t, root)
 	legacyPath := filepath.Join(root, "legacy-evaluation.json")
 	if err := os.WriteFile(legacyPath, []byte(`{"cache_read_tokens":2921704}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -155,12 +163,12 @@ VALUES ('old-eval', 'session', 'case-old', 'claude+test', 1, 1, 2, 'completed', 
 	}
 	for attempt := 0; attempt < 2; attempt++ {
 		for _, tc := range []struct {
-			id          string
-			read, write int64
+			id                 string
+			input, read, write int64
 		}{
-			{"old-eval", 2_921_704, 0},
-			{"with-writes", 200, 300},
-			{"missing-payload", 0, 0},
+			{"old-eval", 2_921_714, 2_921_704, 0},
+			{"with-writes", 510, 200, 300},
+			{"missing-payload", 10, 0, 0},
 		} {
 			var input, cacheRead, cacheWrite int64
 			if err := store.db.QueryRow(
@@ -168,8 +176,130 @@ VALUES ('old-eval', 'session', 'case-old', 'claude+test', 1, 1, 2, 'completed', 
 			).Scan(&input, &cacheRead, &cacheWrite); err != nil {
 				t.Fatalf("legacy row unreadable after migration: %v", err)
 			}
-			if input != 10 || cacheRead != tc.read || cacheWrite != tc.write {
-				t.Fatalf("%s: input %d cache-read %d cache-write %d, want 10/%d/%d", tc.id, input, cacheRead, cacheWrite, tc.read, tc.write)
+			if input != tc.input || cacheRead != tc.read || cacheWrite != tc.write {
+				t.Fatalf("%s: input %d cache-read %d cache-write %d, want %d/%d/%d", tc.id, input, cacheRead, cacheWrite, tc.input, tc.read, tc.write)
+			}
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if attempt == 0 {
+			store, err = Open(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+func TestHistoricalEvaluationCostsUseMigratedTokenCounters(t *testing.T) {
+	root := t.TempDir()
+	database := openLegacyEvaluationRegistry(t, root)
+	if _, err := database.Exec(`DELETE FROM evaluations`); err != nil {
+		t.Fatal(err)
+	}
+	type legacyCase struct {
+		candidate                       string
+		input, fresh, reads, writes     int64
+		reported                        bool
+		wantInput, wantFresh, wantTotal int64
+	}
+	var cases []legacyCase
+	for _, name := range []string{"claude", "pi", "opencode"} {
+		for _, spelling := range []string{name + "+legacy", name + ",model=legacy"} {
+			cases = append(cases, legacyCase{spelling, 10_000, 0, 20_000, 0, true, 30_000, 10_000, 30_500})
+		}
+	}
+	cases = append(cases,
+		legacyCase{"claude,model=large-fresh", 40_000, 20_000, 20_000, 0, true, 60_000, 40_000, 60_500},
+		legacyCase{"opencode,model=reported-writes", 10_000, 0, 20_000, 1_000, true, 31_000, 10_000, 31_500},
+		legacyCase{"grok,model=legacy", 30_000, 10_000, 20_000, 0, true, 30_000, 10_000, 30_500},
+		legacyCase{"grok,model=reported-writes", 31_000, 11_000, 20_000, 1_000, true, 31_000, 10_000, 31_500},
+		legacyCase{"codex,model=legacy", 30_000, 10_000, 20_000, 0, true, 30_000, 10_000, 30_500},
+		legacyCase{"claude,model=unknown", 0, 0, 0, 0, false, 0, 0, 0},
+	)
+	for i, tc := range cases {
+		evaluation := Evaluation{ID: fmt.Sprintf("legacy-%d", i), SessionID: "session", CaseID: "case-old", Candidate: tc.candidate,
+			Repeat: 1, Status: "completed", HasFindingGold: true, GoldCount: 2, TruePositive: 2,
+			TokensReported: tc.reported, InputTokens: tc.input, FreshInputTokens: tc.fresh,
+			CacheReadTokens: tc.reads, CacheWriteTokens: tc.writes}
+		if tc.reported {
+			evaluation.OutputTokens = 500
+		}
+		path := filepath.Join(root, evaluation.ID+".json")
+		if err := writeJSON(path, evaluation); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.Exec(`INSERT INTO evaluations
+(id, session_id, case_id, candidate, repeat_number, started_at, completed_at, status, gold_count, true_positive, false_negative, false_positive, pending, tokens_reported, input_tokens, output_tokens, fresh_input_tokens, duration_ms, path)
+VALUES (?, 'session', 'case-old', ?, 1, 1, 2, 'completed', 2, 2, 0, 0, 0, ?, ?, ?, ?, 40, ?)`,
+			evaluation.ID, tc.candidate, tc.reported, tc.input, evaluation.OutputTokens, tc.fresh, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	c := Case{Manifest: Manifest{ID: "case-old"}, Dir: filepath.Join(root, "cases", "case-old")}
+	for _, evaluation := range []Evaluation{
+		{ID: "normalized", SessionID: "new", CaseID: c.ID, Candidate: "claude,model=normalized", Repeat: 1,
+			Status: "completed", HasFindingGold: true, GoldCount: 2, TruePositive: 2, TokensReported: true,
+			InputTokens: 31_000, FreshInputTokens: 10_000, CacheReadTokens: 20_000, CacheWriteTokens: 1_000, OutputTokens: 500},
+		{ID: "fresh-only", SessionID: "new", CaseID: c.ID, Candidate: "codex,model=fresh-only", Repeat: 1,
+			Status: "completed", HasFindingGold: true, GoldCount: 2, TruePositive: 2, TokensReported: true,
+			InputTokens: 29_000, FreshInputTokens: 29_000, OutputTokens: 500},
+	} {
+		if err := store.persistEvaluation(c, evaluation); err != nil {
+			t.Fatal(err)
+		}
+		cases = append(cases, legacyCase{candidate: evaluation.Candidate, reported: true,
+			wantInput: evaluation.InputTokens, wantFresh: evaluation.FreshInputTokens,
+			reads: evaluation.CacheReadTokens, writes: evaluation.CacheWriteTokens,
+			wantTotal: evaluation.InputTokens + evaluation.OutputTokens})
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		reports, err := Report(store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		byCandidate := make(map[string]CandidateReport)
+		for _, report := range reports {
+			byCandidate[report.Summary.Candidate] = report
+		}
+		for _, tc := range cases {
+			var input, fresh, reads, writes int64
+			if err := store.db.QueryRow(`SELECT input_tokens, fresh_input_tokens, cache_read_tokens, cache_write_tokens FROM evaluations WHERE candidate = ?`, tc.candidate).
+				Scan(&input, &fresh, &reads, &writes); err != nil {
+				t.Fatal(err)
+			}
+			if input != tc.wantInput || fresh != tc.wantFresh || reads != tc.reads || writes != tc.writes {
+				t.Fatalf("%s registry tokens = %d/%d/%d/%d, want %d/%d/%d/%d", tc.candidate,
+					input, fresh, reads, writes, tc.wantInput, tc.wantFresh, tc.reads, tc.writes)
+			}
+			report, exists := byCandidate[tc.candidate]
+			if !exists {
+				t.Fatalf("no report for %s", tc.candidate)
+			}
+			if !tc.reported {
+				if report.AverageTokens != nil {
+					t.Fatalf("%s cost = %v, want unknown", tc.candidate, *report.AverageTokens)
+				}
+				continue
+			}
+			if report.AverageTokens == nil || *report.AverageTokens != float64(tc.wantTotal) {
+				t.Fatalf("%s report = %#v, want cost %d", tc.candidate, report, tc.wantTotal)
+			}
+			if tc.writes == 0 && strings.Contains(RenderReport([]CandidateReport{report}), "cache-write") {
+				t.Fatalf("%s renders unreported cache-write tokens", tc.candidate)
+			}
+			wantFrontier := tc.candidate == "codex,model=fresh-only"
+			if report.OnFrontier != wantFrontier {
+				t.Fatalf("%s frontier = %v, want %v", tc.candidate, report.OnFrontier, wantFrontier)
 			}
 		}
 		if err := store.Close(); err != nil {

@@ -299,6 +299,13 @@ func matchAt(gold FindingGold, finding types.Finding, strength string) bool {
 	}
 }
 
+// similarDescriptions is an automatic, model-free comparison calibrated on 16
+// corpus pairs (SAME-min 0.202, DIFF-max 0.150). None of those pairs contained
+// distinct defects sharing enough location vocabulary to match. That remains
+// an accepted limit: at the same file and line, "parse_config accepts duplicate
+// keys silently overwriting values" and "parse_config accepts unknown keys
+// silently allowing misspelled option values" score 0.5, above every calibrated
+// corpus pair, and can match despite describing different defects.
 func similarDescriptions(a, b string) bool {
 	left := similarityTokens(a)
 	right := similarityTokens(b)

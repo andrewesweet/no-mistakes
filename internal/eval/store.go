@@ -144,18 +144,21 @@ CREATE TABLE IF NOT EXISTS diversified_pins (
 		}
 	}
 	if cacheColumnsAdded {
-		rows, err := tx.Query(`SELECT path FROM evaluations`)
+		rows, err := tx.Query(`SELECT path, candidate FROM evaluations`)
 		if err != nil {
 			return fmt.Errorf("list eval cache payloads: %w", err)
 		}
-		var paths []string
+		type legacyPayload struct {
+			path, candidate string
+		}
+		var payloads []legacyPayload
 		for rows.Next() {
-			var path string
-			if err := rows.Scan(&path); err != nil {
+			var payload legacyPayload
+			if err := rows.Scan(&payload.path, &payload.candidate); err != nil {
 				_ = rows.Close()
 				return fmt.Errorf("scan eval cache payload: %w", err)
 			}
-			paths = append(paths, path)
+			payloads = append(payloads, payload)
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
@@ -164,16 +167,28 @@ CREATE TABLE IF NOT EXISTS diversified_pins (
 		if err := rows.Close(); err != nil {
 			return fmt.Errorf("close eval cache payloads: %w", err)
 		}
-		for _, path := range paths {
+		for _, payload := range payloads {
 			var evaluation Evaluation
-			if err := readJSON(path, &evaluation); err != nil {
+			if err := readJSON(payload.path, &evaluation); err != nil {
 				if os.IsNotExist(err) {
 					continue
 				}
 				return fmt.Errorf("read eval cache payload: %w", err)
 			}
-			if _, err := tx.Exec(`UPDATE evaluations SET cache_read_tokens = ?, cache_write_tokens = ? WHERE path = ?`,
-				evaluation.CacheReadTokens, evaluation.CacheWriteTokens, path); err != nil {
+			name, _, _ := strings.Cut(payload.candidate, ",")
+			name, _, _ = strings.Cut(name, "+")
+			disjointInput := name == "claude" || name == "pi" || name == "opencode"
+			var inputAdjustment int64
+			if disjointInput {
+				inputAdjustment = evaluation.CacheReadTokens + evaluation.CacheWriteTokens
+			}
+			if _, err := tx.Exec(`UPDATE evaluations SET cache_read_tokens = ?, cache_write_tokens = ?,
+input_tokens = CASE WHEN tokens_reported = 1 THEN input_tokens + ? ELSE input_tokens END,
+fresh_input_tokens = CASE WHEN tokens_reported != 1 THEN fresh_input_tokens
+    WHEN ? THEN input_tokens ELSE MAX(input_tokens - ? - ?, 0) END
+WHERE path = ?`,
+				evaluation.CacheReadTokens, evaluation.CacheWriteTokens, inputAdjustment, disjointInput,
+				evaluation.CacheReadTokens, evaluation.CacheWriteTokens, payload.path); err != nil {
 				return fmt.Errorf("backfill eval cache tokens: %w", err)
 			}
 		}
