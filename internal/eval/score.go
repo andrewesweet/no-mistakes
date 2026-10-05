@@ -3,17 +3,27 @@ package eval
 import (
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const (
-	matchExactID         = "exact-id"
-	matchExactText       = "exact-text"
-	matchLocation        = "location"
-	matchContainment     = "containment"
-	locationLineBand     = 3
-	locationJaccardMin   = 0.5
+	matchExactID     = "exact-id"
+	matchExactText   = "exact-text"
+	matchLocation    = "location"
+	matchContainment = "containment"
+	locationLineBand = 3
+	// locationJaccardMin gates the location tier's semantic half. It is
+	// calibrated on replay pairs whose same-defect paraphrases scored 0.20-0.41
+	// under similarityTokens while same-file different-defect pairs within the
+	// line band scored at most 0.15: independent reviews word the same defect
+	// very differently, so the gate must tolerate paraphrase while still
+	// refusing defects that share only a function's surrounding vocabulary.
+	// The prior 0.5 threshold demanded near-literal word overlap and scored
+	// every independently worded replay finding as a miss (auto recall read 0
+	// for replays that re-found gold bugs at the exact file and line).
+	locationJaccardMin   = 0.2
 	containmentMinTokens = 8
 )
 
@@ -338,8 +348,8 @@ func containmentMatch(gold FindingGold, finding types.Finding) bool {
 }
 
 func tokenJaccard(a, b string) float64 {
-	left := uniqueTokens(a)
-	right := uniqueTokens(b)
+	left := similarityTokens(a)
+	right := similarityTokens(b)
 	if len(left) == 0 && len(right) == 0 {
 		return 0
 	}
@@ -356,13 +366,100 @@ func tokenJaccard(a, b string) float64 {
 	return float64(inter) / float64(union)
 }
 
-func uniqueTokens(s string) map[string]bool {
+// similarityTokens normalizes a finding description into the vocabulary the
+// location tier compares: identifiers split into words (snake_case, dotted
+// paths, and camelCase boundaries), English function words dropped, and
+// single-character tokens dropped. Two independently worded descriptions of
+// one defect share that defect's identifier and claim vocabulary even when
+// their sentence structures differ, which is the signal the location tier's
+// semantic gate needs; literal whitespace tokens tied the gate to wording.
+func similarityTokens(description string) map[string]bool {
 	out := map[string]bool{}
-	for _, tok := range strings.Fields(s) {
-		out[tok] = true
+	for _, field := range strings.Fields(strings.ToLower(description)) {
+		for _, word := range splitIdentifierWords(field) {
+			if len(word) > 1 && !similarityStopword(word) {
+				out[word] = true
+			}
+		}
 	}
 	return out
 }
+
+// splitIdentifierWords breaks one whitespace field into its identifier words:
+// non-alphanumeric characters separate (so bin/lease-minter.sh yields bin,
+// lease, minter, sh) and case or letter-digit boundaries split the remainder
+// (so VDETAIL2nd stays vdetail, nd; HTTPServer yields http, server).
+func splitIdentifierWords(field string) []string {
+	var out []string
+	for _, part := range strings.FieldsFunc(field, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		out = append(out, splitCaseWords(part)...)
+	}
+	return out
+}
+
+func splitCaseWords(part string) []string {
+	runes := []rune(part)
+	if len(runes) == 0 {
+		return nil
+	}
+	var out []string
+	start := 0
+	for i := 1; i < len(runes); i++ {
+		prev, cur := runes[i-1], runes[i]
+		next := rune(0)
+		if i+1 < len(runes) {
+			next = runes[i+1]
+		}
+		split := false
+		switch {
+		case unicode.IsLower(prev) && unicode.IsUpper(cur):
+			split = true // camelCase boundary
+		case unicode.IsUpper(prev) && unicode.IsUpper(cur) && unicode.IsLower(next):
+			split = true // acronym-to-word boundary (HTTPServer)
+		case unicode.IsLetter(prev) && unicode.IsDigit(cur):
+			split = true // v2 boundary
+		case unicode.IsDigit(prev) && unicode.IsLetter(cur):
+			split = true // 2nd boundary
+		}
+		if split {
+			out = append(out, strings.ToLower(string(runes[start:i])))
+			start = i
+		}
+	}
+	return append(out, strings.ToLower(string(runes[start:])))
+}
+
+// similarityStopword reports the English function words that carry wording,
+// not defect content. Dropping them is what lets two paraphrases of one bug
+// clear the gate on their shared claim vocabulary.
+var similarityStopwords = map[string]bool{
+	"the": true, "a": true, "an": true, "is": true, "are": true, "was": true,
+	"were": true, "be": true, "been": true, "being": true, "that": true,
+	"this": true, "these": true, "those": true, "with": true, "for": true,
+	"and": true, "or": true, "not": true, "no": true, "nor": true, "but": true,
+	"if": true, "then": true, "than": true, "as": true, "at": true, "by": true,
+	"of": true, "on": true, "in": true, "to": true, "from": true, "it": true,
+	"its": true, "into": true, "over": true, "under": true, "after": true,
+	"before": true, "between": true, "during": true, "through": true,
+	"while": true, "when": true, "where": true, "which": true, "who": true,
+	"whose": true, "what": true, "how": true, "why": true, "all": true,
+	"any": true, "both": true, "each": true, "few": true, "more": true,
+	"most": true, "other": true, "some": true, "such": true, "only": true,
+	"own": true, "same": true, "so": true, "too": true, "very": true,
+	"can": true, "will": true, "just": true, "should": true, "now": true,
+	"still": true, "every": true, "however": true, "because": true,
+	"about": true, "against": true, "above": true, "below": true, "off": true,
+	"out": true, "up": true, "down": true, "again": true, "further": true,
+	"once": true, "here": true, "there": true, "also": true, "thus": true,
+	"hence": true, "therefore": true, "may": true, "might": true, "must": true,
+	"shall": true, "would": true, "could": true, "do": true, "does": true,
+	"did": true, "done": true, "doing": true, "having": true, "has": true,
+	"have": true, "had": true,
+}
+
+func similarityStopword(word string) bool { return similarityStopwords[word] }
 
 func normalizeIssue(file, description string) (string, string) {
 	file = filepath.ToSlash(strings.TrimSpace(file))

@@ -1,10 +1,103 @@
 package eval
 
 import (
+	"encoding/json"
+	"fmt"
 	"math/rand"
 	"strings"
 	"testing"
 )
+
+// paraphraseGold and paraphraseCandidate describe the same defect in
+// independently worded prose: they share the defect's identifiers and core
+// vocabulary but almost no sentence structure, the shape real replays produce
+// against recorded gold. Their raw whitespace-token Jaccard is far below the
+// threshold that made every independent replay score zero, so these fixtures
+// pin the calibrated similarity, not literal word overlap.
+const paraphraseGold = "session_reaper never releases a lease in production. bin/lease-minter.sh arm writes the lease as `l<epoch>.<pid>.<random>` (line 159), but the verifier rejects any id matching `*[!0-9]*`, so every real worker record returns 1. lease_sweep then only sees teardown, and stale-worker-suppress fires over a relaunched worker are counted correct."
+
+const paraphraseCandidate = "session_reaper rejects every real worker lease token: the only lease minter is bin/lease-minter.sh:159 (`L=$(date +%s).$$.$RANDOM`, echoed verbatim into `v1 lease=<token>` records), and the guard `case \"$l\" in ''|*[!0-9]*) return 1` fails on the prefix letter and dots of every production token, so renewals never validate."
+
+func paraphraseGoldLabels(line int) Labels {
+	return Labels{Findings: []FindingGold{{
+		ID:          "lease-format",
+		Kind:        GoldTruePositive,
+		File:        "internal/lease/reap.go",
+		Line:        line,
+		Description: paraphraseGold,
+	}}}
+}
+
+func paraphraseCandidateJSON(line int) string {
+	return fmt.Sprintf(`{"findings":[{"id":"lease-token-never-validates","file":"internal/lease/reap.go","line":%d,"description":%s}]}`,
+		line, mustJSONString(paraphraseCandidate))
+}
+
+// mustJSONString embeds a fixture description into a findings JSON payload.
+func mustJSONString(s string) string {
+	encoded, err := json.Marshal(s)
+	if err != nil {
+		panic(err) // json.Marshal of a string cannot fail
+	}
+	return string(encoded)
+}
+
+// TestScoreCandidateMatcherTable walks the documented match classes: the
+// exact tiers, the location band, and the boundaries that must stay unmatched.
+// One gold finding matches at most one candidate finding.
+func TestScoreCandidateMatcherTable(t *testing.T) {
+	unrelated := "the retry loop re-enqueues a job whose deadline already passed instead of failing it, so a poison message circulates until the queue depth alert trips and the worker pool starves."
+	candidate := func(id, file string, line int, description string) string {
+		return fmt.Sprintf(`{"findings":[{"id":%s,"file":%s,"line":%d,"description":%s}]}`,
+			mustJSONString(id), mustJSONString(file), line, mustJSONString(description))
+	}
+	for _, tc := range []struct {
+		name        string
+		candidate   string
+		wantTP      int
+		wantExact   int
+		wantFuzzy   int
+		wantFN      int
+		wantPending int
+	}{
+		{name: "exact id wins regardless of file and line",
+			candidate: candidate("lease-format", "elsewhere/other.go", 900, paraphraseCandidate),
+			wantTP:    1, wantExact: 1},
+		{name: "paraphrase at the same line matches",
+			candidate: paraphraseCandidateJSON(276),
+			wantTP:    1, wantFuzzy: 1},
+		{name: "paraphrase at the top of the line band matches",
+			candidate: paraphraseCandidateJSON(279),
+			wantTP:    1, wantFuzzy: 1},
+		{name: "paraphrase at the bottom of the line band matches",
+			candidate: paraphraseCandidateJSON(273),
+			wantTP:    1, wantFuzzy: 1},
+		{name: "same defect paraphrase beyond the line band is a miss",
+			candidate: paraphraseCandidateJSON(280),
+			wantFN:    1, wantPending: 1},
+		{name: "same defect paraphrase in a different file is a miss",
+			candidate: candidate("lease-token-never-validates", "internal/lease/other.go", 276, paraphraseCandidate),
+			wantFN:    1, wantPending: 1},
+		{name: "a different defect at the same file and line stays unmatched",
+			candidate: candidate("retry-loop-poison", "internal/lease/reap.go", 276, unrelated),
+			wantFN:    1, wantPending: 1},
+		{name: "two candidates competing for one gold match exactly one",
+			candidate: fmt.Sprintf(`{"findings":[%s,%s]}`,
+				strings.TrimSuffix(strings.TrimPrefix(paraphraseCandidateJSON(276), `{"findings":[`), `]}`),
+				strings.TrimSuffix(strings.TrimPrefix(candidate("lease-retry-drift", "internal/lease/reap.go", 276, paraphraseCandidate), `{"findings":[`), `]}`)),
+			wantTP: 1, wantFuzzy: 1, wantPending: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			score := ScoreCandidate(paraphraseGoldLabels(276), tc.candidate)
+			if score.TruePositive != tc.wantTP || score.TruePositiveExact != tc.wantExact ||
+				score.TruePositiveFuzzy != tc.wantFuzzy || score.FalseNegative != tc.wantFN ||
+				score.Pending != tc.wantPending {
+				t.Fatalf("score = %#v, want tp %d exact %d fuzzy %d fn %d pending %d",
+					score, tc.wantTP, tc.wantExact, tc.wantFuzzy, tc.wantFN, tc.wantPending)
+			}
+		})
+	}
+}
 
 func TestScoreCandidateMatchesNearbyLineWithSimilarDescription(t *testing.T) {
 	labels := Labels{Findings: []FindingGold{{
