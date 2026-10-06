@@ -1,9 +1,11 @@
 package eval
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -225,6 +227,9 @@ func TestStoreMigrationSkipsDamagedCachePayloads(t *testing.T) {
 			if err := database.Close(); err != nil {
 				t.Fatal(err)
 			}
+			var warnings bytes.Buffer
+			log.SetOutput(&warnings)
+			t.Cleanup(func() { log.SetOutput(os.Stderr) })
 			for attempt := 0; attempt < 2; attempt++ {
 				store, err := Open(root)
 				if err != nil {
@@ -266,6 +271,15 @@ func TestStoreMigrationSkipsDamagedCachePayloads(t *testing.T) {
 				if err := store.Close(); err != nil {
 					t.Fatal(err)
 				}
+			}
+			// The skip must be visible: the warning names the skipped record's
+			// id so the operator can repair or retire it, and never quotes the
+			// damaged payload's contents.
+			if warnings := warnings.String(); !strings.Contains(warnings, "bad-eval") {
+				t.Fatalf("migration warnings must name the skipped record id, got: %q", warnings)
+			}
+			if damage == "malformed" && strings.Contains(warnings.String(), malformed) {
+				t.Fatalf("migration warning must not quote the damaged payload: %q", warnings.String())
 			}
 		})
 	}

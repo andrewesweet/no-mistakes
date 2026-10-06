@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -145,17 +146,17 @@ CREATE TABLE IF NOT EXISTS diversified_pins (
 		}
 	}
 	if cacheColumnsAdded {
-		rows, err := tx.Query(`SELECT path, candidate FROM evaluations`)
+		rows, err := tx.Query(`SELECT id, path, candidate FROM evaluations`)
 		if err != nil {
 			return fmt.Errorf("list eval cache payloads: %w", err)
 		}
 		type legacyPayload struct {
-			path, candidate string
+			id, path, candidate string
 		}
 		var payloads []legacyPayload
 		for rows.Next() {
 			var payload legacyPayload
-			if err := rows.Scan(&payload.path, &payload.candidate); err != nil {
+			if err := rows.Scan(&payload.id, &payload.path, &payload.candidate); err != nil {
 				_ = rows.Close()
 				return fmt.Errorf("scan eval cache payload: %w", err)
 			}
@@ -171,6 +172,11 @@ CREATE TABLE IF NOT EXISTS diversified_pins (
 		for _, payload := range payloads {
 			var evaluation Evaluation
 			if err := readJSON(payload.path, &evaluation); err != nil {
+				// A damaged historical payload stays skipped (its cache columns
+				// keep NULL = unknown cost), but the skip must be visible: name
+				// the record so the operator can repair or retire it. The error
+				// is a JSON or filesystem error message, never payload contents.
+				log.Printf("eval cache migration: skipped unreadable evaluation %s at %s: %v", payload.id, payload.path, err)
 				continue
 			}
 			name, _, _ := strings.Cut(payload.candidate, ",")
