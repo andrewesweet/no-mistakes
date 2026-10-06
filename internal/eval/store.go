@@ -137,7 +137,8 @@ CREATE TABLE IF NOT EXISTS diversified_pins (
 			return fmt.Errorf("inspect eval evaluation schema: %w", err)
 		}
 		if cacheTokenColumn == 0 {
-			if _, err := tx.Exec(`ALTER TABLE evaluations ADD COLUMN ` + column + ` INTEGER NOT NULL DEFAULT 0`); err != nil {
+			// A historical payload may be unavailable; NULL keeps its cost unknown.
+			if _, err := tx.Exec(`ALTER TABLE evaluations ADD COLUMN ` + column + ` INTEGER`); err != nil {
 				return fmt.Errorf("migrate eval evaluation schema: %w", err)
 			}
 			cacheColumnsAdded = true
@@ -170,10 +171,7 @@ CREATE TABLE IF NOT EXISTS diversified_pins (
 		for _, payload := range payloads {
 			var evaluation Evaluation
 			if err := readJSON(payload.path, &evaluation); err != nil {
-				if os.IsNotExist(err) {
-					continue
-				}
-				return fmt.Errorf("read eval cache payload: %w", err)
+				continue
 			}
 			name, _, _ := strings.Cut(payload.candidate, ",")
 			name, _, _ = strings.Cut(name, "+")

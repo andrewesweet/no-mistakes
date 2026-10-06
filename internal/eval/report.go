@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"database/sql"
 	"fmt"
 	"math"
 	"sort"
@@ -90,7 +91,8 @@ func (s *Store) evaluations() ([]Evaluation, error) {
 	var result []Evaluation
 	for rows.Next() {
 		var path string
-		var input, fresh, cacheRead, cacheWrite int64
+		var input, fresh int64
+		var cacheRead, cacheWrite sql.NullInt64
 		if err := rows.Scan(&path, &input, &fresh, &cacheRead, &cacheWrite); err != nil {
 			return nil, fmt.Errorf("scan eval result: %w", err)
 		}
@@ -100,8 +102,10 @@ func (s *Store) evaluations() ([]Evaluation, error) {
 		}
 		evaluation.InputTokens = input
 		evaluation.FreshInputTokens = fresh
-		evaluation.CacheReadTokens = cacheRead
-		evaluation.CacheWriteTokens = cacheWrite
+		evaluation.CacheReadTokens = cacheRead.Int64
+		evaluation.CacheWriteTokens = cacheWrite.Int64
+		// A skipped historical backfill cannot certify the token total.
+		evaluation.TokensReported = evaluation.TokensReported && cacheRead.Valid && cacheWrite.Valid
 		result = append(result, evaluation)
 	}
 	if err := rows.Err(); err != nil {

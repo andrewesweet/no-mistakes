@@ -165,19 +165,21 @@ func TestStoreMigrationAddsCacheTokenColumnsForward(t *testing.T) {
 		for _, tc := range []struct {
 			id                 string
 			input, read, write int64
+			unknown            bool
 		}{
-			{"old-eval", 2_921_714, 2_921_704, 0},
-			{"with-writes", 510, 200, 300},
-			{"missing-payload", 10, 0, 0},
+			{"old-eval", 2_921_714, 2_921_704, 0, false},
+			{"with-writes", 510, 200, 300, false},
+			{"missing-payload", 10, 0, 0, true},
 		} {
-			var input, cacheRead, cacheWrite int64
+			var input int64
+			var cacheRead, cacheWrite sql.NullInt64
 			if err := store.db.QueryRow(
 				`SELECT input_tokens, cache_read_tokens, cache_write_tokens FROM evaluations WHERE id = ?`, tc.id,
 			).Scan(&input, &cacheRead, &cacheWrite); err != nil {
 				t.Fatalf("legacy row unreadable after migration: %v", err)
 			}
-			if input != tc.input || cacheRead != tc.read || cacheWrite != tc.write {
-				t.Fatalf("%s: input %d cache-read %d cache-write %d, want %d/%d/%d", tc.id, input, cacheRead, cacheWrite, tc.input, tc.read, tc.write)
+			if input != tc.input || cacheRead != (sql.NullInt64{Int64: tc.read, Valid: !tc.unknown}) || cacheWrite != (sql.NullInt64{Int64: tc.write, Valid: !tc.unknown}) {
+				t.Fatalf("%s: input %d cache-read %v cache-write %v, want %d/%d/%d (unknown: %t)", tc.id, input, cacheRead, cacheWrite, tc.input, tc.read, tc.write, tc.unknown)
 			}
 		}
 		if err := store.Close(); err != nil {
@@ -189,6 +191,114 @@ func TestStoreMigrationAddsCacheTokenColumnsForward(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+	}
+}
+
+func TestStoreMigrationSkipsDamagedCachePayloads(t *testing.T) {
+	for _, damage := range []string{"malformed", "unreadable", "missing"} {
+		t.Run(damage, func(t *testing.T) {
+			root := t.TempDir()
+			database := openLegacyEvaluationRegistry(t, root)
+			goodPath := filepath.Join(root, "good.json")
+			if err := writeJSON(goodPath, Evaluation{CacheReadTokens: 200, CacheWriteTokens: 300}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.Exec(`UPDATE evaluations SET path = ? WHERE id = 'old-eval'`, goodPath); err != nil {
+				t.Fatal(err)
+			}
+			badPath := filepath.Join(root, "bad.json")
+			const malformed = `{"cache_read_tokens":99,"cache_write_tokens":`
+			switch damage {
+			case "malformed":
+				if err := os.WriteFile(badPath, []byte(malformed), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable":
+				// Reading a directory fails on every platform, including as root.
+				if err := os.Mkdir(badPath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := database.Exec(`INSERT INTO evaluations SELECT 'bad-eval', session_id, case_id, candidate, repeat_number, started_at, completed_at, status, gold_count, true_positive, false_negative, false_positive, pending, tokens_reported, input_tokens, output_tokens, fresh_input_tokens, duration_ms, ? FROM evaluations WHERE id = 'old-eval'`, badPath); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.Close(); err != nil {
+				t.Fatal(err)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				store, err := Open(root)
+				if err != nil {
+					t.Fatalf("open registry with %s payload: %v", damage, err)
+				}
+				t.Cleanup(func() { _ = store.Close() })
+				var read, write int64
+				if err := store.db.QueryRow(`SELECT cache_read_tokens, cache_write_tokens FROM evaluations WHERE id = 'old-eval'`).Scan(&read, &write); err != nil {
+					t.Fatal(err)
+				}
+				if read != 200 || write != 300 {
+					t.Fatalf("good row cache tokens = %d/%d, want 200/300", read, write)
+				}
+				var input, fresh int64
+				var badRead, badWrite sql.NullInt64
+				var path string
+				if err := store.db.QueryRow(`SELECT input_tokens, fresh_input_tokens, cache_read_tokens, cache_write_tokens, path FROM evaluations WHERE id = 'bad-eval'`).Scan(&input, &fresh, &badRead, &badWrite, &path); err != nil {
+					t.Fatal(err)
+				}
+				if input != 10 || fresh != 30 || badRead.Valid || badWrite.Valid || path != badPath {
+					t.Fatalf("damaged row changed: input %d fresh %d cache %v/%v path %q", input, fresh, badRead, badWrite, path)
+				}
+				switch damage {
+				case "malformed":
+					data, err := os.ReadFile(badPath)
+					if err != nil || string(data) != malformed {
+						t.Fatalf("damaged payload changed: %q, %v", data, err)
+					}
+				case "unreadable":
+					info, err := os.Stat(badPath)
+					if err != nil || !info.IsDir() {
+						t.Fatalf("unreadable payload changed: %v", err)
+					}
+				case "missing":
+					if _, err := os.Stat(badPath); !os.IsNotExist(err) {
+						t.Fatalf("missing payload changed: %v", err)
+					}
+				}
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestReportKeepsUnmigratedCacheCostsUnknown(t *testing.T) {
+	for _, column := range []string{"cache_read_tokens", "cache_write_tokens"} {
+		t.Run(column, func(t *testing.T) {
+			store, err := Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			c := Case{Manifest: Manifest{ID: "unknown-cache", SourceRunID: "run", SourceRoundID: "round"}, Dir: store.caseDir("unknown-cache")}
+			if err := store.registerCase(c); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.persistEvaluation(c, Evaluation{ID: "unknown-cache", SessionID: "session", CaseID: c.ID, Candidate: "claude,model=test", Repeat: 1,
+				Status: "completed", HasFindingGold: true, GoldCount: 1, TruePositive: 1, TokensReported: true,
+				InputTokens: 510, FreshInputTokens: 10, CacheReadTokens: 200, CacheWriteTokens: 300, OutputTokens: 20}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec(`UPDATE evaluations SET ` + column + ` = NULL`); err != nil {
+				t.Fatal(err)
+			}
+			reports, err := Report(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(reports) != 1 || reports[0].Summary.TruePositive != 1 || reports[0].AverageTokens != nil || reports[0].AverageCacheReadTokens != nil || reports[0].AverageCacheWriteTokens != nil || reports[0].OnFrontier {
+				t.Fatalf("unknown cache cost must preserve scores without claiming cost or frontier: %#v", reports)
+			}
+		})
 	}
 }
 
