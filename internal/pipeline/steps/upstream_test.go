@@ -340,7 +340,10 @@ func TestResolveBranchBaseSHA_EvalReplayResolvesWithoutAnUpstreamFetch(t *testin
 	gitCmd(t, replay, "add", "change.txt")
 	gitCmd(t, replay, "commit", "-q", "-m", "replayed change")
 
-	replayCtx := minimalStepContext(t, replay, "")
+	// Use a nonexistent recorded upstream so an attempted fetch fails on every
+	// Git version; an empty fetch source is not consistently rejected.
+	unreachable := filepath.Join(t.TempDir(), "does-not-exist")
+	replayCtx := minimalStepContext(t, replay, unreachable)
 	replayCtx.EvalReplay = true
 	base, err := resolveBranchBaseSHA(context.Background(), replayCtx, "", "main")
 	if err != nil {
@@ -350,9 +353,9 @@ func TestResolveBranchBaseSHA_EvalReplayResolvesWithoutAnUpstreamFetch(t *testin
 		t.Fatalf("eval replay base = %s, want the pinned %s", base, capturedBase)
 	}
 
-	// The live-gate contrast: the same remote-less worktree must refuse to
+	// The live-gate contrast: the same unreachable upstream must refuse to
 	// resolve rather than silently trust the pinned ref.
-	gateCtx := minimalStepContext(t, replay, "")
+	gateCtx := minimalStepContext(t, replay, unreachable)
 	_, err = resolveBranchBaseSHA(context.Background(), gateCtx, "", "main")
 	if err == nil || !strings.Contains(err.Error(), "fetch default branch") {
 		t.Fatalf("non-replay resolution error = %v, want the fetch-default-branch refusal", err)
