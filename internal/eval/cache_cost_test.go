@@ -1,10 +1,10 @@
 package eval
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -227,9 +227,19 @@ func TestStoreMigrationSkipsDamagedCachePayloads(t *testing.T) {
 			if err := database.Close(); err != nil {
 				t.Fatal(err)
 			}
-			var warnings bytes.Buffer
-			log.SetOutput(&warnings)
-			t.Cleanup(func() { log.SetOutput(os.Stderr) })
+			warnings, err := os.Create(filepath.Join(root, "warnings.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			originalStderr, originalLogWriter := os.Stderr, log.Writer()
+			os.Stderr = warnings
+			// The CLI discards logs when its optional log directory is absent.
+			log.SetOutput(io.Discard)
+			t.Cleanup(func() {
+				os.Stderr = originalStderr
+				log.SetOutput(originalLogWriter)
+				_ = warnings.Close()
+			})
 			for attempt := 0; attempt < 2; attempt++ {
 				store, err := Open(root)
 				if err != nil {
@@ -275,11 +285,16 @@ func TestStoreMigrationSkipsDamagedCachePayloads(t *testing.T) {
 			// The skip must be visible: the warning names the skipped record's
 			// id so the operator can repair or retire it, and never quotes the
 			// damaged payload's contents.
-			if warnings := warnings.String(); !strings.Contains(warnings, "bad-eval") {
-				t.Fatalf("migration warnings must name the skipped record id, got: %q", warnings)
+			warningBytes, err := os.ReadFile(warnings.Name())
+			if err != nil {
+				t.Fatal(err)
 			}
-			if damage == "malformed" && strings.Contains(warnings.String(), malformed) {
-				t.Fatalf("migration warning must not quote the damaged payload: %q", warnings.String())
+			warningText := string(warningBytes)
+			if !strings.Contains(warningText, "bad-eval") {
+				t.Fatalf("migration warnings must name the skipped record id, got: %q", warningText)
+			}
+			if damage == "malformed" && strings.Contains(warningText, malformed) {
+				t.Fatalf("migration warning must not quote the damaged payload: %q", warningText)
 			}
 		})
 	}

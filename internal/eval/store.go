@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -176,7 +175,8 @@ CREATE TABLE IF NOT EXISTS diversified_pins (
 				// keep NULL = unknown cost), but the skip must be visible: name
 				// the record so the operator can repair or retire it. The error
 				// is a JSON or filesystem error message, never payload contents.
-				log.Printf("eval cache migration: skipped unreadable evaluation %s at %s: %v", payload.id, payload.path, err)
+				// Write directly to stderr because the CLI may discard its logs.
+				fmt.Fprintf(os.Stderr, "eval cache migration: skipped unreadable evaluation %s at %s: %v\n", payload.id, payload.path, err)
 				continue
 			}
 			name, _, _ := strings.Cut(payload.candidate, ",")
