@@ -392,9 +392,13 @@ func matchAt(gold FindingGold, finding types.Finding, strength string, contexts 
 // two truly distinct defects at one anchor can still share claim words (the
 // corpus's unadjudicated backstop pair still matches at 0.257); the gate no
 // longer credits shared location wording on its own.
-// In a file with exactly three descriptions, a shared claim can be treated
+// In a file with exactly three descriptions of any kind, including one gold
+// plus two replay findings for the same defect, a shared claim can be treated
 // as ubiquitous and a true paraphrase can go unmatched.
 // In files with fewer than three descriptions, no ubiquity filtering applies.
+// Words from the finding file path are removed before fuzzy comparison, so
+// two paraphrases whose only shared defect word is a path word (for example
+// cache in cache.go) go unmatched.
 func similarDescriptions(a, b string, ctx *claimContext) bool {
 	left := claimTokens(a, ctx)
 	right := claimTokens(b, ctx)
