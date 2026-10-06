@@ -123,7 +123,7 @@ When a harness reports the model it served, replay verifies the model name again
 
 Effort is part of the candidate identity, so `codex,model=gpt-5.4,effort=low` and `codex,model=gpt-5.4,effort=high` are reported as two candidates rather than collapsing into one.
 
-The replay restores each case into a fresh temporary bare gate and worktree, then invokes only the existing Review step. Push, PR, CI, test, lint, document, and fix loops are outside this subject under test.
+The replay restores each case into a fresh temporary bare gate and worktree, then invokes only the existing Review step. Branch-base resolution uses the captured default-branch commit restored as a local remote-tracking ref, without fetching an upstream remote. A case pool therefore needs no configured remote to replay. Push, PR, CI, test, lint, document, and fix loops are outside this subject under test.
 
 Replay scores each candidate finding against that gold:
 
@@ -132,7 +132,9 @@ Replay scores each candidate finding against that gold:
 - **false-positive**: only when a candidate finding matches explicit false-positive gold (adjudicated invalid, or shipped-unfixed). Unmatched candidate findings are never treated as false positives
 - **pending / unlabeled**: unmatched candidate findings, and cases with no finding-level gold yet
 
-Matching is a documented cascade of strengths: the same finding ID, the same file and description after whitespace and case normalization, the same file with lines within 3 and token-Jaccard ≥ 0.5, then gated containment (same file, one normalized description contains the other, shorter side ≥ 8 tokens). Assignment is one globally optimal matching over every gold and candidate finding at once, ranked so an exact match outweighs any number of fuzzy ones, so neither gold-label order nor a tier boundary can undercount recall. Headline recall uses the full cascade. Reports also show recall-if-exact-only so a fuzzy-threshold change is visible. File-less or description-less findings do not match on the text, location, or containment strengths.
+Matching is automatic and model-free; finding IDs do not affect it. Every match requires the same file after trimming whitespace and normalizing path separators, a nonempty description, and positive line numbers within 3 lines of each other. Within that location band, descriptions equal after whitespace and case normalization earn an exact-text match. Otherwise, descriptions earn a fuzzy match when their token-Jaccard similarity (shared unique tokens divided by all unique tokens) is at least 0.5, or at least 0.2 with 8 or more shared tokens. Similarity tokens split identifiers at punctuation, camelCase, acronym, and letter-digit boundaries, then lowercase words and drop English function words and single-character tokens.
+
+Assignment is one globally optimal matching over every gold and candidate finding at once. Each gold and candidate finding participates in at most one match. An exact-text match outweighs any number of fuzzy ones, so neither gold-label order nor a tier boundary can undercount recall. Headline recall uses both strengths. Reports also show recall-if-exact-only so a fuzzy-threshold change is visible. Findings missing a file, description, or positive line number remain unmatched.
 
 The report prints recall, precision bounds (adjudicated vs pending-as-FP), and F1 as the headline metric **only when false-positive gold exists** so precision is real. Otherwise F1 is withheld rather than reported as recall-in-disguise.
 
@@ -157,12 +159,16 @@ The report groups local replays by candidate and cohort. A cohort pins the selec
 - precision bounds, and F1 only when false-positive gold exists
 - queued unmatched candidate findings, which are not scored as false positives
 - failed candidate invocations
-- reported fresh-input plus output token cost, summed over every review attempt in a replay, including Review's reruns after a rejected output, and reported as missing when any attempt reports no usage
+- average token cost per replay: fresh input plus output, cache reads, and reported cache writes, summed over every review attempt in each replay, including Review's reruns after a rejected output, and reported as missing when any attempt reports no usage
 - average wall time
 - a finite-sample case-level recall range, with repeats averaged inside each case
 - whether a candidate lies on the observed recall-versus-token-cost frontier
 
-The report is deliberately cautious. It never treats an unadjudicated candidate finding as a false positive, excludes candidates with failed replays from the frontier, and distinguishes missing token instrumentation from a real zero. It is a pure read: repeated reports over unchanged recorded evaluations produce identical text output.
+Eval records cache-read and cache-write counts in each evaluation payload and in the local registry. Input totals include reported cache reads and writes; eval subtracts both to calculate fresh input, then adds each bucket once to the report total. The cost line shows positive cache-read and cache-write segments separately. Unreported cache writes, including those absent from older payloads, contribute no separate segment. The frontier compares these token totals without provider pricing weights.
+
+Opening an older registry automatically backfills available cache counts from saved evaluation payloads and corrects its legacy input and fresh-input counters for the provider's accounting. Reports use those corrected registry counters; captured labels, manifests, and historical payloads stay unchanged. Cache writes that were never recorded cannot be recovered.
+
+The report is deliberately cautious. It never treats an unadjudicated candidate finding as a false positive, excludes candidates with failed replays from the frontier, and distinguishes missing token instrumentation from a real zero. After any registry migration, repeated reports over unchanged recorded evaluations produce identical text output.
 
 ## Current boundary
 
