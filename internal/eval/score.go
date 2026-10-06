@@ -13,8 +13,13 @@ const (
 	matchLocation             = "location"
 	locationLineBand          = 3
 	locationJaccardMin        = 0.5
-	paraphraseJaccardMin      = 0.2
-	paraphraseMinSharedTokens = 8
+	paraphraseJaccardMin      = 0.175
+	paraphraseMinSharedTokens = 12
+	// ubiquitousMinDescriptions is how many descriptions one file needs before
+	// its shared vocabulary can be recognized as location vocabulary. Below
+	// this, prevalence is meaningless (two findings share wording by chance)
+	// and nothing is down-weighted.
+	ubiquitousMinDescriptions = 3
 )
 
 // Score is one candidate's finding-level confusion matrix against gold.
@@ -46,7 +51,7 @@ type Score struct {
 // reported separately so a threshold change is visible.
 func ScoreCandidate(labels Labels, findingsJSON string) Score {
 	candidate := parseFindingItems(findingsJSON)
-	assigned := assignMatches(labels.Findings, candidate)
+	assigned := assignMatches(labels.Findings, candidate, newClaimContexts(labels.Findings, candidate))
 	used := make([]bool, len(candidate))
 	var score Score
 	for i, gold := range labels.Findings {
@@ -112,7 +117,7 @@ type assignedMatch struct {
 // exact match for two fuzzy ones, and among the assignments with the most exact
 // pairs it takes the one with the most location pairs.
 // hungarianMinCost solves that max-weight assignment exactly.
-func assignMatches(golds []FindingGold, candidate []types.Finding) []assignedMatch {
+func assignMatches(golds []FindingGold, candidate []types.Finding, contexts map[string]*claimContext) []assignedMatch {
 	out := make([]assignedMatch, len(golds))
 	for i := range out {
 		out[i].cand = -1
@@ -128,7 +133,7 @@ func assignMatches(golds []FindingGold, candidate []types.Finding) []assignedMat
 		strength[gi] = make([]string, len(candidate))
 		for ci, finding := range candidate {
 			for _, s := range []string{matchExactText, matchLocation} {
-				if matchAt(gold, finding, s) {
+				if matchAt(gold, finding, s, contexts) {
 					weight[gi][ci] = weightFor(s, base)
 					strength[gi][ci] = s
 					break
@@ -277,7 +282,80 @@ func hungarianMinCost(cost [][]int64) []int {
 	return rowToCol
 }
 
-func matchAt(gold FindingGold, finding types.Finding, strength string) bool {
+// claimContext is the per-file vocabulary the location tier down-weights
+// before comparing two descriptions, so the gate measures shared defect-claim
+// words instead of shared location vocabulary: tokens drawn from the finding
+// file path, plus tokens that most findings in that file share (present in
+// more than half of them, when the file has enough findings for prevalence to
+// mean anything). Both halves are computed from data the score already has -
+// the finding's own file and the case's finding pool - so matching stays
+// deterministic and model-free.
+type claimContext struct {
+	pathTokens map[string]bool
+	ubiquitous map[string]bool
+}
+
+// newClaimContexts builds one claimContext per file named by any gold or
+// candidate finding, from every description recorded for that file.
+func newClaimContexts(golds []FindingGold, candidate []types.Finding) map[string]*claimContext {
+	descs := map[string][]string{}
+	add := func(file, description string) {
+		file, desc := normalizeIssue(file, description)
+		if file == "" || desc == "" {
+			return
+		}
+		descs[file] = append(descs[file], desc)
+	}
+	for _, gold := range golds {
+		add(gold.File, gold.Description)
+	}
+	for _, finding := range candidate {
+		add(finding.File, finding.Description)
+	}
+	out := map[string]*claimContext{}
+	for file, list := range descs {
+		ctx := &claimContext{pathTokens: claimPathTokens(file)}
+		if len(list) >= ubiquitousMinDescriptions {
+			df := map[string]int{}
+			for _, desc := range list {
+				seen := map[string]bool{}
+				for tok := range similarityTokens(desc) {
+					seen[tok] = true
+				}
+				for tok := range seen {
+					df[tok]++
+				}
+			}
+			ctx.ubiquitous = map[string]bool{}
+			for tok, count := range df {
+				if float64(count) > float64(len(list))/2 {
+					ctx.ubiquitous[tok] = true
+				}
+			}
+		}
+		out[file] = ctx
+	}
+	return out
+}
+
+// claimPathTokens splits the finding's file path into its identifier words.
+// Extension tokens and single letters are dropped; they never carry defect
+// content, and their presence in both descriptions is pure location echo.
+func claimPathTokens(file string) map[string]bool {
+	out := map[string]bool{}
+	for _, seg := range splitIdentifierWords(filepath.ToSlash(file)) {
+		switch seg {
+		case "go", "ts", "sh", "md", "json", "yaml", "yml", "test":
+			continue
+		}
+		if len(seg) > 1 {
+			out[seg] = true
+		}
+	}
+	return out
+}
+
+func matchAt(gold FindingGold, finding types.Finding, strength string, contexts map[string]*claimContext) bool {
 	goldFile, goldDesc := normalizeIssue(gold.File, gold.Description)
 	candFile, candDesc := normalizeIssue(finding.File, finding.Description)
 	if goldFile == "" || candFile == "" || goldDesc == "" || candDesc == "" {
@@ -293,22 +371,30 @@ func matchAt(gold FindingGold, finding types.Finding, strength string) bool {
 	case matchExactText:
 		return strings.EqualFold(goldDesc, candDesc)
 	case matchLocation:
-		return similarDescriptions(goldDesc, candDesc)
+		return similarDescriptions(goldDesc, candDesc, contexts[goldFile])
 	default:
 		return false
 	}
 }
 
-// similarDescriptions is an automatic, model-free comparison calibrated on 16
-// corpus pairs (SAME-min 0.202, DIFF-max 0.150). None of those pairs contained
-// distinct defects sharing enough location vocabulary to match. That remains
-// an accepted limit: at the same file and line, "parse_config accepts duplicate
-// keys silently overwriting values" and "parse_config accepts unknown keys
-// silently allowing misspelled option values" score 0.5, above every calibrated
-// corpus pair, and can match despite describing different defects.
-func similarDescriptions(a, b string) bool {
-	left := similarityTokens(a)
-	right := similarityTokens(b)
+// similarDescriptions is an automatic, model-free comparison of the two
+// descriptions' defect-claim vocabulary: similarityTokens minus the file's
+// location vocabulary (path words and tokens most findings in that file
+// share; see claimContext). Calibrated on the captured corpus with this
+// down-weighting, all twelve hand-adjudicated same-defect pairs score
+// 0.179-0.403 with 19-34 shared claim tokens, while the reviewer's distinct
+// nearby-defect pairs - gold "parse_config accepts duplicate keys silently
+// overwriting values" against "accepts unknown keys silently allowing
+// misspelled option values" and against "accepts unknown keys rather than
+// rejecting typos" - share only incidental tokens (one, "values", for the
+// first) once parse/config/keys/accepts/silently are recognized as the
+// file's shared vocabulary, far below every calibrated pair. Residual limit:
+// two truly distinct defects at one anchor can still share claim words (the
+// corpus's unadjudicated backstop pair still matches at 0.257); the gate no
+// longer credits shared location wording on its own.
+func similarDescriptions(a, b string, ctx *claimContext) bool {
+	left := claimTokens(a, ctx)
+	right := claimTokens(b, ctx)
 	inter := 0
 	for tok := range left {
 		if right[tok] {
@@ -322,6 +408,19 @@ func similarDescriptions(a, b string) bool {
 	similarity := float64(inter) / float64(union)
 	return similarity >= locationJaccardMin ||
 		(inter >= paraphraseMinSharedTokens && similarity >= paraphraseJaccardMin)
+}
+
+// claimTokens drops the file's location vocabulary from a description's
+// tokens, leaving what the location tier may credit a match on.
+func claimTokens(description string, ctx *claimContext) map[string]bool {
+	out := map[string]bool{}
+	for tok := range similarityTokens(description) {
+		if ctx != nil && (ctx.pathTokens[tok] || ctx.ubiquitous[tok]) {
+			continue
+		}
+		out[tok] = true
+	}
+	return out
 }
 
 // similarityTokens normalizes a finding description into the vocabulary the

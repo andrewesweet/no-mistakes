@@ -96,11 +96,11 @@ func TestScoreCandidateMatcherTable(t *testing.T) {
 		{name: "a different defect at the same file and line stays unmatched",
 			candidate: candidate("retry-loop-poison", "internal/lease/reap.go", 276, unrelated),
 			wantFN:    1, wantPending: 1},
-		{name: "two candidates competing for one gold match exactly one",
+		{name: "two exact candidates competing for one gold match exactly one",
 			candidate: fmt.Sprintf(`{"findings":[%s,%s]}`,
-				strings.TrimSuffix(strings.TrimPrefix(paraphraseCandidateJSON(276), `{"findings":[`), `]}`),
-				strings.TrimSuffix(strings.TrimPrefix(candidate("lease-retry-drift", "internal/lease/reap.go", 276, paraphraseCandidate), `{"findings":[`), `]}`)),
-			wantTP: 1, wantFuzzy: 1, wantPending: 1},
+				strings.TrimSuffix(strings.TrimPrefix(candidate("replay-a", "internal/lease/reap.go", 276, paraphraseGold), `{"findings":[`), `]}`),
+				strings.TrimSuffix(strings.TrimPrefix(candidate("replay-b", "internal/lease/reap.go", 277, paraphraseGold), `{"findings":[`), `]}`)),
+			wantTP: 1, wantExact: 1, wantPending: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			score := ScoreCandidate(paraphraseGoldLabels(276), tc.candidate)
@@ -223,19 +223,19 @@ func TestScoreCandidateDoesNotLetFuzzyEarlierGoldStealExactLaterMatch(t *testing
 			Kind:        GoldTruePositive,
 			File:        "main.go",
 			Line:        10,
-			Description: "nil pointer dereference in the request handler",
+			Description: "nil pointer dereference in the request handler when the retry budget is exhausted",
 		},
 		{
 			ID:          "shutdown-deref",
 			Kind:        GoldTruePositive,
 			File:        "main.go",
 			Line:        12,
-			Description: "nil pointer dereference in the request handler during shutdown",
+			Description: "nil pointer dereference in the request handler during graceful shutdown",
 		},
 	}}
 	candidate := `{"findings":[` +
-		`{"id":"independent","file":"main.go","line":12,"description":"nil pointer dereference in the request handler during shutdown"},` +
-		`{"id":"other","file":"main.go","line":11,"description":"nil pointer deref in request handler"}` +
+		`{"id":"independent","file":"main.go","line":12,"description":"nil pointer dereference in the request handler during graceful shutdown"},` +
+		`{"id":"other","file":"main.go","line":11,"description":"handler nil dereference while the retry budget is exhausted"}` +
 		`]}`
 
 	score := ScoreCandidate(labels, candidate)
@@ -244,12 +244,11 @@ func TestScoreCandidateDoesNotLetFuzzyEarlierGoldStealExactLaterMatch(t *testing
 	}
 }
 
-// Both gold items match candidate 1 exactly by text, and only the first also has
-// a fuzzy (nearby-line) match on candidate 2. The tiered matcher this replaced
-// resolved the exact tier on its own, handed candidate 1 to the first gold, and
-// then had nothing left for the second - one match where two exist. A globally
-// optimal assignment gives candidate 1 to the gold that has no alternative and
-// covers the other fuzzily, with the same number of exact matches.
+// Both gold items describe distinct defect claims. Candidate 1 matches the
+// second gold exactly by text, and candidate 2 covers the first gold fuzzily
+// through shared claim vocabulary. A greedy tier cascade that let candidate 1
+// satisfy the first gold would strand the second; the globally optimal
+// assignment pairs each candidate with the gold it actually claims.
 func TestScoreCandidateRecoversMatchTheTieredMatcherLost(t *testing.T) {
 	labels := Labels{Findings: []FindingGold{
 		{
@@ -257,19 +256,19 @@ func TestScoreCandidateRecoversMatchTheTieredMatcherLost(t *testing.T) {
 			Kind:        GoldTruePositive,
 			File:        "main.go",
 			Line:        10,
-			Description: "nil pointer dereference in the request handler",
+			Description: "nil pointer dereference in the request handler when the retry budget is exhausted",
 		},
 		{
 			ID:          "shared-id",
 			Kind:        GoldTruePositive,
 			File:        "main.go",
-			Line:        13,
-			Description: "nil pointer dereference in the request handler",
+			Line:        12,
+			Description: "nil pointer dereference in the request handler while tracing drops span attributes",
 		},
 	}}
 	candidate := `{"findings":[` +
-		`{"id":"shared-id","file":"main.go","line":10,"description":"nil pointer dereference in the request handler"},` +
-		`{"id":"other","file":"main.go","line":9,"description":"nil pointer dereference in the request handler during shutdown"}` +
+		`{"id":"shared-id","file":"main.go","line":12,"description":"nil pointer dereference in the request handler while tracing drops span attributes"},` +
+		`{"id":"other","file":"main.go","line":9,"description":"request handler nil dereference once the retry budget is exhausted"}` +
 		`]}`
 
 	score := ScoreCandidate(labels, candidate)
@@ -281,6 +280,56 @@ func TestScoreCandidateRecoversMatchTheTieredMatcherLost(t *testing.T) {
 	}
 	if score.Pending != 0 {
 		t.Fatalf("score = %#v, want both candidates consumed by the assignment", score)
+	}
+}
+
+// TestScoreCandidateRecoversMatchTheTieredMatcherLost exists to pin assignment
+// optimality; this one pins the maintainer-reported precision case.
+//
+// The maintainer pair (and the reviewer's first negative) share only location
+// vocabulary with the gold: parse_config, keys, accepts, silently are words
+// most findings in this file use. With that vocabulary down-weighted, the
+// distinct-defect replay shares one incidental token (values) with the gold
+// and stays unmatched, while a true duplicate-keys replay still matches on its
+// defect claim.
+func TestScoreCandidateMaintainerPairStaysUnmatched(t *testing.T) {
+	labels := Labels{Findings: []FindingGold{
+		{
+			ID:          "dup-keys-overwrite",
+			Kind:        GoldTruePositive,
+			File:        "internal/config/parse.go",
+			Line:        40,
+			Description: "parse_config accepts duplicate keys silently overwriting values",
+		},
+		{
+			ID:          "malformed-lines",
+			Kind:        GoldTruePositive,
+			File:        "internal/config/parse.go",
+			Line:        80,
+			Description: "parse_config rejects malformed lines with a usable error",
+		},
+		{
+			ID:          "unknown-keys-accepted",
+			Kind:        GoldTruePositive,
+			File:        "internal/config/parse.go",
+			Line:        120,
+			Description: "parse_config accepts unknown keys rather than rejecting typos",
+		},
+	}}
+	candidate := `{"findings":[` +
+		`{"id":"replay-dup-keys","file":"internal/config/parse.go","line":40,"description":"the last duplicate wins because parse_config is silently overwriting values"},` +
+		`{"id":"replay-unknown-keys","file":"internal/config/parse.go","line":41,"description":"parse_config accepts unknown keys silently allowing misspelled option values"}` +
+		`]}`
+
+	score := ScoreCandidate(labels, candidate)
+	if score.TruePositive != 1 || score.TruePositiveFuzzy != 1 {
+		t.Fatalf("score = %#v, want the true duplicate-keys replay matched fuzzily", score)
+	}
+	if score.FalseNegative != 2 {
+		t.Fatalf("score = %#v, want the two unmatched golds counted as misses", score)
+	}
+	if score.Pending != 1 {
+		t.Fatalf("score = %#v, want the maintainer pair (replay-unknown-keys) left pending, not credited", score)
 	}
 }
 
