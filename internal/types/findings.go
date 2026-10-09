@@ -400,6 +400,10 @@ func NormalizeFindings(findings Findings, prefix string) Findings {
 	used := make(map[string]bool, len(findings.Items))
 	for i := range findings.Items {
 		findings.Items[i].ID = strings.TrimSpace(findings.Items[i].ID)
+		if used[findings.Items[i].ID] {
+			findings.Items[i].ID = ""
+			continue
+		}
 		used[findings.Items[i].ID] = true
 	}
 	for i := range findings.Items {

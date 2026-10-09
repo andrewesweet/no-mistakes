@@ -542,6 +542,10 @@ func TestNormalizeFindingsAvoidsIDCollisions(t *testing.T) {
 		{"earlier explicit ID", []string{"test-2", ""}, []string{"test-2", "test-3"}},
 		{"later padded explicit ID", []string{"", " test-1 "}, []string{"test-2", "test-1"}},
 		{"multiple occupied IDs", []string{"test-2", "", "", "test-4"}, []string{"test-2", "test-3", "test-5", "test-4"}},
+		{"repeated explicit ID", []string{"x", "x"}, []string{"x", "test-2"}},
+		{"padded repeated IDs", []string{" x ", "x", " x "}, []string{"x", "test-2", "test-3"}},
+		{"duplicate skips later explicit IDs", []string{"x", "x", "test-2", "test-3"}, []string{"x", "test-4", "test-2", "test-3"}},
+		{"duplicates and generated IDs", []string{"test-2", "test-2", "", "test-3"}, []string{"test-2", "test-4", "test-5", "test-3"}},
 		{"no collision", []string{"custom", "", ""}, []string{"custom", "test-2", "test-3"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
