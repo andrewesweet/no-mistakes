@@ -72,6 +72,12 @@ func findingKey(item types.Finding) types.Finding {
 	return item
 }
 
+// SameFinding reports whether a and b describe the same finding, ignoring the
+// ID, action, source, and operator instructions a later round may restate.
+func SameFinding(a, b types.Finding) bool {
+	return findingKey(a) == findingKey(b)
+}
+
 func findingFingerprint(item types.Finding) types.Finding {
 	item = findingKey(item)
 	item.Line = 0

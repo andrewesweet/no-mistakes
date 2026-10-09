@@ -18,11 +18,22 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const cleanTestEvidence = `{"summary":"fixed","findings":%s,"tested":["x"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"user runs the command","result":"pass","live":true,"evidence":"x","reason":""}],"verdict":"go"}`
+const (
+	breach            = "apply wrote outside the worktree"
+	breachFinding     = `{"id":"test-isolation-breach","severity":"error","action":"no-op","description":"` + breach + `"}`
+	cleanTestEvidence = `{"summary":"fixed","findings":%s,"tested":["x"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"user runs the command","result":"pass","live":true,"evidence":"x","reason":""}],"verdict":"go"}`
+)
 
 // fixRoundTestContext is a Test step on an automatic fix round whose
 // evidence turn comes back clean: verdict go, reporting only reported.
 func fixRoundTestContext(t *testing.T, deferred, reported string) *pipeline.StepContext {
+	t.Helper()
+	sctx := humanFixRoundTestContext(t, deferred, reported)
+	sctx.AutoFixRound = true
+	return sctx
+}
+
+func humanFixRoundTestContext(t *testing.T, deferred, reported string) *pipeline.StepContext {
 	t.Helper()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
@@ -59,8 +70,7 @@ func descriptionCount(t *testing.T, raw, description string) int {
 // clear it: it must survive the round and keep the step parked.
 func TestTestStep_FixRoundKeepsUnselectedFindings(t *testing.T) {
 	t.Parallel()
-	const breach = "apply wrote outside the worktree"
-	sctx := fixRoundTestContext(t, `{"findings":[{"id":"test-isolation-breach","severity":"error","action":"no-op","description":"`+breach+`"}],"summary":"no-go"}`, `[]`)
+	sctx := fixRoundTestContext(t, `{"findings":[`+breachFinding+`],"summary":"no-go"}`, `[]`)
 
 	outcome, err := (&TestStep{}).Execute(sctx)
 	if err != nil {
@@ -74,12 +84,29 @@ func TestTestStep_FixRoundKeepsUnselectedFindings(t *testing.T) {
 	}
 }
 
+// A human fix response accounts for every finding it leaves unselected as an
+// explicit decline, so a fix round a human started carries none of them.
+func TestTestStep_HumanFixRoundDoesNotCarryDeclinedFindings(t *testing.T) {
+	t.Parallel()
+	sctx := humanFixRoundTestContext(t, `{"findings":[`+breachFinding+`],"summary":"no-go"}`, `[]`)
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("NeedsApproval = true, want the declined finding left decided; findings = %s", outcome.Findings)
+	}
+	if got := descriptionCount(t, outcome.Findings, breach); got != 0 {
+		t.Fatalf("declined finding appears %d times, want 0; findings = %s", got, outcome.Findings)
+	}
+}
+
 func TestTestStep_FixRoundDoesNotDuplicateAReReportedFinding(t *testing.T) {
 	t.Parallel()
-	const breach = "apply wrote outside the worktree"
 	sctx := fixRoundTestContext(t,
-		`{"findings":[{"id":"test-isolation-breach","severity":"error","action":"no-op","description":"`+breach+`"}],"summary":"no-go"}`,
-		`[{"id":"test-isolation-breach","severity":"error","action":"no-op","description":"`+breach+`"}]`)
+		`{"findings":[`+breachFinding+`],"summary":"no-go"}`,
+		`[`+breachFinding+`]`)
 
 	outcome, err := (&TestStep{}).Execute(sctx)
 	if err != nil {
@@ -103,12 +130,16 @@ func TestTestStep_FixRoundDoesNotCarryAnEarlierVerdict(t *testing.T) {
 	if outcome.NeedsApproval {
 		t.Fatalf("NeedsApproval = true, want the earlier verdict superseded; findings = %s", outcome.Findings)
 	}
+	if got := descriptionCount(t, outcome.Findings, "live validation verdict: inconclusive"); got != 0 {
+		t.Fatalf("earlier verdict appears %d times, want 0; findings = %s", got, outcome.Findings)
+	}
 }
 
 // End to end through the executor: a no-go verdict starts an automatic fix
 // round, which defers the agent's ask-user finding. The fix round's clean
-// result must still park on that finding instead of completing the run.
-func TestTestStep_DeferredAskUserFindingParksAfterACleanFixRound(t *testing.T) {
+// result must still park on that finding, and only a human decision on it
+// lets the step complete.
+func TestTestStep_DeferredAskUserFindingParksUntilAHumanDecidesIt(t *testing.T) {
 	t.Parallel()
 	const question = "this failing check looks intentional; confirm it should exist"
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -118,12 +149,12 @@ func TestTestStep_DeferredAskUserFindingParksAfterACleanFixRound(t *testing.T) {
 	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 		mu.Lock()
 		calls++
-		first := calls == 1
+		call := calls
 		mu.Unlock()
-		if first {
+		if call == 1 {
 			return &agent.Result{Output: json.RawMessage(`{"summary":"broken","findings":[{"id":"intent-check","severity":"warning","action":"ask-user","description":"` + question + `"}],"tested":["x"],"testing_summary":"failed","artifacts":[],"scenarios":[{"name":"user runs the command","result":"fail","live":true,"evidence":"x","reason":""}],"verdict":"no-go"}`)}, nil
 		}
-		if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte(fmt.Sprint("fix ", call)), 0o644); err != nil {
 			return nil, err
 		}
 		return &agent.Result{Output: json.RawMessage(fmt.Sprintf(cleanTestEvidence, "[]"))}, nil
@@ -133,24 +164,18 @@ func TestTestStep_DeferredAskUserFindingParksAfterACleanFixRound(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	parked := make(chan string, 1)
+	parked := make(chan string, 2)
 	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&TestStep{}}, func(event ipc.Event) {
 		if event.Type == ipc.EventStepCompleted && event.Status != nil && (*event.Status == string(types.StepStatusAwaitingApproval) || *event.Status == string(types.StepStatusFixReview)) && event.Findings != nil {
-			select {
-			case parked <- *event.Findings:
-			default:
-			}
-			cancel()
+			parked <- *event.Findings
 		}
 	})
 	done := make(chan error, 1)
 	go func() { done <- exec.Execute(ctx, sctx.Run, sctx.Repo, dir) }()
 
+	var gate string
 	select {
-	case findings := <-parked:
-		if got := descriptionCount(t, findings, question); got != 1 {
-			t.Fatalf("parked gate carries the deferred ask-user finding %d times, want 1; findings = %s", got, findings)
-		}
+	case gate = <-parked:
 	case err := <-done:
 		run, getErr := sctx.DB.GetRun(sctx.Run.ID)
 		if getErr != nil {
@@ -160,9 +185,43 @@ func TestTestStep_DeferredAskUserFindingParksAfterACleanFixRound(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("Test step neither parked nor finished")
 	}
+	findings, err := types.ParseFindingsJSON(gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var questionID string
+	for _, item := range findings.Items {
+		if item.Description == question {
+			if questionID != "" {
+				t.Fatalf("parked gate carries the deferred ask-user finding twice: %s", gate)
+			}
+			questionID = item.ID
+		}
+	}
+	if questionID == "" {
+		t.Fatalf("parked gate lacks the deferred ask-user finding: %s", gate)
+	}
+
+	// A human fix response that declines it is that decision.
+	added := []types.Finding{{Severity: types.FindingSeverityInfo, Description: "rename the fixture", Action: types.ActionAutoFix}}
+	if _, err := exec.RespondWithOverrides(types.StepTest, types.ActionFix, []string{}, []string{questionID}, nil, added, ""); err != nil {
+		t.Fatal(err)
+	}
 	select {
-	case <-done:
-	case <-time.After(15 * time.Second):
-		t.Error("executor did not stop")
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run failed after the human decision: %v", err)
+		}
+	case gate := <-parked:
+		t.Fatalf("declined finding parked the step again: %s", gate)
+	case <-time.After(30 * time.Second):
+		t.Fatal("Test step did not finish after the human decision")
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != types.RunCompleted {
+		t.Fatalf("run status = %s, want %s", run.Status, types.RunCompleted)
 	}
 }

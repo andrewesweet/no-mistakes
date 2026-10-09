@@ -1414,6 +1414,7 @@ rounds:
 				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFixing), "", "", nil)
 				phaseStart = time.Now()
 				sctx.Fixing = true
+				sctx.AutoFixRound = true
 				sctx.FinalizingAnswers = false
 				sctx.SkipFixExecution = false
 				sctx.PreviousFindings = fixableFindings
@@ -1551,6 +1552,7 @@ rounds:
 					slog.Warn("failed to start step fix round in db", "step", stepName, "error", dbErr)
 				}
 				sctx.Fixing = true
+				sctx.AutoFixRound = false
 				// A genuine fix round always executes its fixer, even when the
 				// round before it was an answer replay that suppressed one.
 				sctx.FinalizingAnswers = false

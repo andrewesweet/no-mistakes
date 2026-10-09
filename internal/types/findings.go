@@ -117,6 +117,11 @@ const FindingCategoryReviewQuestion = "review-question"
 // recorded as an override rather than a silent green completion.
 const FindingCategoryTestCommand = "test-command"
 
+// FindingCategoryTestVerdict marks the finding the Test step derives from its
+// evidence turn's verdict. Each evidence turn derives its own, so an earlier
+// turn's verdict finding is never carried into a later round.
+const FindingCategoryTestVerdict = "test-verdict"
+
 // FindingIDTestAgentTimeout is the Test-step park when an evidence or repair
 // invocation burned its wall-clock budget. It is a budget/provider-slowness
 // cut, not a product defect; TestOverrideReason treats an approval of this
