@@ -397,12 +397,21 @@ func FindingsMetadata(findings Findings) Findings {
 // and the response side trims what it is given, so a padded gate ID used to
 // have no spelling that could select or decline it.
 func NormalizeFindings(findings Findings, prefix string) Findings {
+	used := make(map[string]bool, len(findings.Items))
 	for i := range findings.Items {
 		findings.Items[i].ID = strings.TrimSpace(findings.Items[i].ID)
+		used[findings.Items[i].ID] = true
+	}
+	for i := range findings.Items {
 		if findings.Items[i].ID != "" {
 			continue
 		}
-		findings.Items[i].ID = prefix + "-" + itoa(i+1)
+		id := prefix + "-" + itoa(i+1)
+		for next := i + 2; used[id]; next++ {
+			id = prefix + "-" + itoa(next)
+		}
+		findings.Items[i].ID = id
+		used[id] = true
 	}
 	return findings
 }

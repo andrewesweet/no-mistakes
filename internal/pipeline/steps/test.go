@@ -726,7 +726,9 @@ func unselectedTestFindings(sctx *pipeline.StepContext, current []Finding) []Fin
 		if item.ActionOrDefault() != types.ActionAskUser && item.Severity != types.FindingSeverityError && item.Severity != types.FindingSeverityWarning {
 			continue
 		}
-		if slices.ContainsFunc(current, func(reported Finding) bool { return pipeline.SameFinding(reported, item) }) {
+		if slices.ContainsFunc(current, func(reported Finding) bool {
+			return pipeline.SameFinding(reported, item) && reported.ActionOrDefault() == item.ActionOrDefault()
+		}) {
 			continue
 		}
 		// Cleared so it is renumbered: this round's own findings may reuse the ID.

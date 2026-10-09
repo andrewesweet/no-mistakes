@@ -117,6 +117,35 @@ func TestTestStep_FixRoundDoesNotDuplicateAReReportedFinding(t *testing.T) {
 	}
 }
 
+func TestTestStep_FixRoundCarriedFindingGetsADistinctID(t *testing.T) {
+	t.Parallel()
+	const currentDescription = "current observation"
+	sctx := fixRoundTestContext(t,
+		`{"findings":[`+breachFinding+`],"summary":"no-go"}`,
+		`[{"id":"test-2","severity":"info","action":"no-op","description":"`+currentDescription+`"}]`)
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.NeedsApproval {
+		t.Fatalf("NeedsApproval = false, want the carried finding to park; findings = %s", outcome.Findings)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings = types.NormalizeFindings(findings, string(types.StepTest))
+	selected := types.FilterFindings(findings, []string{"test-2"})
+	if len(selected.Items) != 1 || selected.Items[0].Description != currentDescription {
+		t.Fatalf("test-2 selected %+v, want only the current finding", selected.Items)
+	}
+	deferred := types.ExcludeFindings(findings, []string{"test-2"})
+	if len(deferred.Items) != 1 || deferred.Items[0].Description != breach || deferred.Items[0].ID != "test-3" {
+		t.Fatalf("deferred findings = %+v, want the carried finding as test-3", deferred.Items)
+	}
+}
+
 // Every evidence turn derives its own verdict finding, so an earlier turn's
 // inconclusive verdict is superseded by this turn's go rather than carried.
 func TestTestStep_FixRoundDoesNotCarryAnEarlierVerdict(t *testing.T) {
@@ -141,6 +170,24 @@ func TestTestStep_FixRoundDoesNotCarryAnEarlierVerdict(t *testing.T) {
 // lets the step complete.
 func TestTestStep_DeferredAskUserFindingParksUntilAHumanDecidesIt(t *testing.T) {
 	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		severity string
+		action   string
+	}{
+		{"clean rerun", types.FindingSeverityWarning, ""},
+		{"info re-reported as no-op", types.FindingSeverityInfo, types.ActionNoOp},
+		{"warning re-reported as auto-fix", types.FindingSeverityWarning, types.ActionAutoFix},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			testDeferredAskUserFindingParksUntilAHumanDecidesIt(t, tc.severity, tc.action)
+		})
+	}
+}
+
+func testDeferredAskUserFindingParksUntilAHumanDecidesIt(t *testing.T, severity, reportedAction string) {
+	t.Helper()
 	const question = "this failing check looks intentional; confirm it should exist"
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
@@ -152,10 +199,14 @@ func TestTestStep_DeferredAskUserFindingParksUntilAHumanDecidesIt(t *testing.T) 
 		call := calls
 		mu.Unlock()
 		if call == 1 {
-			return &agent.Result{Output: json.RawMessage(`{"summary":"broken","findings":[{"id":"intent-check","severity":"warning","action":"ask-user","description":"` + question + `"}],"tested":["x"],"testing_summary":"failed","artifacts":[],"scenarios":[{"name":"user runs the command","result":"fail","live":true,"evidence":"x","reason":""}],"verdict":"no-go"}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"summary":"broken","findings":[{"id":"intent-check","severity":"` + severity + `","action":"ask-user","description":"` + question + `"}],"tested":["x"],"testing_summary":"failed","artifacts":[],"scenarios":[{"name":"user runs the command","result":"fail","live":true,"evidence":"x","reason":""}],"verdict":"no-go"}`)}, nil
 		}
 		if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte(fmt.Sprint("fix ", call)), 0o644); err != nil {
 			return nil, err
+		}
+		if call == 3 && reportedAction != "" {
+			reported := `[{"id":"intent-check","severity":"` + severity + `","action":"` + reportedAction + `","description":"` + question + `"}]`
+			return &agent.Result{Output: json.RawMessage(fmt.Sprintf(cleanTestEvidence, reported))}, nil
 		}
 		return &agent.Result{Output: json.RawMessage(fmt.Sprintf(cleanTestEvidence, "[]"))}, nil
 	}}
@@ -190,8 +241,10 @@ func TestTestStep_DeferredAskUserFindingParksUntilAHumanDecidesIt(t *testing.T) 
 		t.Fatal(err)
 	}
 	var questionID string
+	var ignoredIDs []string
 	for _, item := range findings.Items {
-		if item.Description == question {
+		ignoredIDs = append(ignoredIDs, item.ID)
+		if item.Description == question && item.ActionOrDefault() == types.ActionAskUser {
 			if questionID != "" {
 				t.Fatalf("parked gate carries the deferred ask-user finding twice: %s", gate)
 			}
@@ -204,7 +257,7 @@ func TestTestStep_DeferredAskUserFindingParksUntilAHumanDecidesIt(t *testing.T) 
 
 	// A human fix response that declines it is that decision.
 	added := []types.Finding{{Severity: types.FindingSeverityInfo, Description: "rename the fixture", Action: types.ActionAutoFix}}
-	if _, err := exec.RespondWithOverrides(types.StepTest, types.ActionFix, []string{}, []string{questionID}, nil, added, ""); err != nil {
+	if _, err := exec.RespondWithOverrides(types.StepTest, types.ActionFix, []string{}, ignoredIDs, nil, added, ""); err != nil {
 		t.Fatal(err)
 	}
 	select {

@@ -71,7 +71,7 @@ func TestExecutor_AutoFixCarriesUnselectedFindingsSeparately(t *testing.T) {
 				AutoFixable:   true,
 				Findings: `{"findings":[` +
 					`{"id":"ci-1","severity":"error","description":"test failed","action":"auto-fix"},` +
-					`{"id":"ci-2","severity":"warning","description":"bot finding","action":"ask-user"}` +
+					`{"id":"ci-2","severity":"error","description":"test failed","action":"ask-user"}` +
 					`],"summary":"mixed findings"}`,
 			}, nil
 		}
