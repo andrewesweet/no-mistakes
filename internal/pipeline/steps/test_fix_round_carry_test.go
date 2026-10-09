@@ -164,6 +164,47 @@ func TestTestStep_FixRoundDoesNotCarryAnEarlierVerdict(t *testing.T) {
 	}
 }
 
+func TestTestStep_AutoFixCarryPolicy(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		finding  types.Finding
+		retained bool
+	}{
+		{"warning observation", types.Finding{Severity: types.FindingSeverityWarning, Action: types.ActionNoOp}, true},
+		{"error observation", types.Finding{Severity: types.FindingSeverityError, Action: types.ActionNoOp}, true},
+		{"informational question", types.Finding{Severity: types.FindingSeverityInfo, Action: types.ActionAskUser}, true},
+		{"informational observation", types.Finding{Severity: types.FindingSeverityInfo, Action: types.ActionNoOp}, false},
+		{"configured command", types.Finding{Severity: types.FindingSeverityError, Category: types.FindingCategoryTestCommand}, false},
+		{"agent timeout", types.Finding{ID: types.FindingIDTestAgentTimeout, Severity: types.FindingSeverityWarning, Action: types.ActionAskUser}, false},
+		{"unvalidated work", types.Finding{ID: types.FindingIDTestAgentUnvalidatedWork, Severity: types.FindingSeverityError, Action: types.ActionAskUser}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.finding.Description = "earlier round: " + tc.name
+			deferred, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{tc.finding}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			outcome, err := (&TestStep{}).Execute(fixRoundTestContext(t, deferred, `[]`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if tc.retained {
+				want = 1
+			}
+			if got := descriptionCount(t, outcome.Findings, tc.finding.Description); got != want {
+				t.Fatalf("deferred finding appears %d times, want %d; findings = %s", got, want, outcome.Findings)
+			}
+			wantApproval := tc.retained && (tc.finding.Severity == types.FindingSeverityError || tc.finding.Severity == types.FindingSeverityWarning)
+			if outcome.NeedsApproval != wantApproval {
+				t.Fatalf("NeedsApproval = %t, want %t; findings = %s", outcome.NeedsApproval, wantApproval, outcome.Findings)
+			}
+		})
+	}
+}
+
 // End to end through the executor: a no-go verdict starts an automatic fix
 // round, which defers the agent's ask-user finding. The fix round's clean
 // result must still park on that finding, and only a human decision on it

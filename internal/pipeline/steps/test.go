@@ -706,8 +706,9 @@ func answeredTestGate(sctx *pipeline.StepContext) Findings {
 // record what an earlier turn observed - a write outside the workspace, say -
 // rather than a property of the code, so this round's clean result cannot
 // clear them; only a human response can. Step-owned findings are skipped
-// because this execution derives them again, and so is one this round already
-// re-reported.
+// because this execution derives them again. A re-report replaces a deferred
+// finding only when SameFinding and the effective action both match: matching
+// content alone could erase an undecided ask-user finding after an action change.
 func unselectedTestFindings(sctx *pipeline.StepContext, current []Finding) []Finding {
 	if !sctx.AutoFixRound {
 		return nil

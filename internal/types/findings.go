@@ -118,8 +118,9 @@ const FindingCategoryReviewQuestion = "review-question"
 const FindingCategoryTestCommand = "test-command"
 
 // FindingCategoryTestVerdict marks the finding the Test step derives from its
-// evidence turn's verdict. Each evidence turn derives its own, so an earlier
-// turn's verdict finding is never carried into a later round.
+// evidence turn's verdict. A completed evidence turn replaces an earlier
+// verdict finding; a budget-cut park can retain the last completed turn's
+// verdict finding because the cut supplies no new verdict.
 const FindingCategoryTestVerdict = "test-verdict"
 
 // FindingIDTestAgentTimeout is the Test-step park when an evidence or repair
@@ -391,11 +392,14 @@ func FindingsMetadata(findings Findings) Findings {
 	return findings
 }
 
-// NormalizeFindings assigns deterministic IDs to findings that do not have one
-// yet, and trims the ones they arrive with. Surrounding whitespace is never
-// part of a finding's identity: the gate shows the ID and a response names it,
-// and the response side trims what it is given, so a padded gate ID used to
-// have no spelling that could select or decline it.
+// NormalizeFindings trims IDs and makes them unique within the findings set.
+// The first occurrence of an explicit ID keeps it; missing IDs and later
+// duplicates receive deterministic prefix-N IDs that skip every reserved ID,
+// including explicit IDs later in the set. Selecting one finding must never
+// select or discard an unrelated finding with the same ID.
+// Surrounding whitespace is never part of a finding's identity: the gate shows
+// the ID and a response names it, and the response side trims what it is given,
+// so a padded gate ID used to have no spelling that could select or decline it.
 func NormalizeFindings(findings Findings, prefix string) Findings {
 	used := make(map[string]bool, len(findings.Items))
 	for i := range findings.Items {
