@@ -1,7 +1,10 @@
 package db
 
 import (
+	"errors"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
@@ -58,6 +61,304 @@ func TestRunInsertAndUpdatePreserveBuildIdentity(t *testing.T) {
 	}
 	if got.NoMistakesBuildSHA == nil || *got.NoMistakesBuildSHA != buildinfo.Commit {
 		t.Fatalf("no-mistakes build SHA = %v, want %q", got.NoMistakesBuildSHA, buildinfo.Commit)
+	}
+}
+
+func TestUpdateRunClosingIssueRefsNormalizesAndPersists(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+
+	if err := d.UpdateRunClosingIssueRefs(run.ID, []string{" 42 ", "owner/repo#7", "42"}); err != nil {
+		t.Fatalf("update closing issue references: %v", err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if refs := strings.Join(got.ClosingIssueRefs, ","); refs != "42,owner/repo#7" {
+		t.Fatalf("closing issue references = %q, want canonical deduplicated refs", refs)
+	}
+}
+
+func TestMergeRunClosingIssueRefsPreservesEarlierValues(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := d.UpdateRunClosingIssueRefs(run.ID, []string{"42", "owner/repo#7"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MergeRunClosingIssueRefs(run.ID, []string{"99", "OWNER/REPO#7"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs := strings.Join(got.ClosingIssueRefs, ","); refs != "42,99,owner/repo#7" {
+		t.Fatalf("merged closing issue references = %q", refs)
+	}
+}
+
+// `axi run --closes` re-sends the same references after a fresh run already
+// recorded them from its push options. Once claimed, a reference that is
+// already recorded is accepted (it is in the composed body); only a NEW one
+// is refused.
+func TestMergeRunClosingIssueRefsAfterClaimAcceptsOnlyRecordedRefs(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := d.UpdateRunClosingIssueRefs(run.ID, []string{"42", "owner/repo#7"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ClaimClosingIssueRefsForPRBody(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MergeRunClosingIssueRefs(run.ID, []string{"OWNER/REPO#7", "42"}); err != nil {
+		t.Fatalf("recorded refs after claim = %v, want accepted", err)
+	}
+	if err := d.MergeRunClosingIssueRefs(run.ID, []string{"42", "99"}); !errors.Is(err, ErrClosingIssueRefsLocked) {
+		t.Fatalf("new ref after claim = %v, want ErrClosingIssueRefsLocked", err)
+	}
+}
+
+// The reattach race: an `axi run --closes` update that lands after the PR step
+// has already sampled the closing issue references can no longer reach the composed body,
+// so it must fail closed instead of reporting a write the PR will never show.
+func TestUpdateRunClosingIssueRefsFailsClosedAfterPRBodyClaim(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+
+	// The PR step composes the body, claiming whatever was set at that moment.
+	claimed, err := d.ClaimClosingIssueRefsForPRBody(run.ID)
+	if err != nil {
+		t.Fatalf("claim closing issue references: %v", err)
+	}
+	if len(claimed) != 0 {
+		t.Fatalf("claimed = %q, want empty", claimed)
+	}
+
+	// The reattach update arrives too late.
+	err = d.UpdateRunClosingIssueRefs(run.ID, []string{"42"})
+	if !errors.Is(err, ErrClosingIssueRefsLocked) {
+		t.Fatalf("update after claim = %v, want ErrClosingIssueRefsLocked", err)
+	}
+	if err := d.MergeRunClosingIssueRefs(run.ID, []string{"42"}); !errors.Is(err, ErrClosingIssueRefsLocked) {
+		t.Fatalf("merge after claim = %v, want ErrClosingIssueRefsLocked", err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if len(got.ClosingIssueRefs) != 0 {
+		t.Fatalf("closing issue references = %#v, want empty: a refused update must not persist", got.ClosingIssueRefs)
+	}
+}
+
+// A database created before the claim column gains it on reopen, and its
+// pre-existing runs read back as unclaimed so a run that was already in flight
+// during an upgrade can still receive its closing issue references.
+func TestOpenMigratesClosingIssueRefsLockedAtColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	repo, err := d.InsertRepo("/tmp/repo", "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	// Simulate a pre-claim database.
+	if _, err := d.sql.Exec(`ALTER TABLE runs DROP COLUMN closing_issue_refs_locked_at`); err != nil {
+		t.Fatalf("drop column: %v", err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer d.Close()
+
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get after migration: %v", err)
+	}
+	if got.ClosingIssueRefsLockedAt != nil {
+		t.Fatalf("migrated run = %#v, want unclaimed", got.ClosingIssueRefsLockedAt)
+	}
+	// An in-flight run from before the upgrade still accepts its closing issue references.
+	if err := d.UpdateRunClosingIssueRefs(run.ID, []string{"42"}); err != nil {
+		t.Fatalf("update after migration: %v", err)
+	}
+	claimed, err := d.ClaimClosingIssueRefsForPRBody(run.ID)
+	if err != nil {
+		t.Fatalf("claim after migration: %v", err)
+	}
+	if strings.Join(claimed, ",") != "42" {
+		t.Fatalf("claimed = %q, want 42", claimed)
+	}
+}
+
+// An update that wins the race must still apply, and the claim must observe it.
+func TestClaimClosingIssueRefsForPRBodyObservesEarlierUpdate(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+
+	if err := d.UpdateRunClosingIssueRefs(run.ID, []string{"42"}); err != nil {
+		t.Fatalf("update closing issue references: %v", err)
+	}
+	claimed, err := d.ClaimClosingIssueRefsForPRBody(run.ID)
+	if err != nil {
+		t.Fatalf("claim closing issue references: %v", err)
+	}
+	if strings.Join(claimed, ",") != "42" {
+		t.Fatalf("claimed = %q, want 42", claimed)
+	}
+}
+
+// The claim is idempotent: a PR step that runs again (resume, or updating an
+// existing PR) recomposes from the value it already claimed.
+func TestClaimClosingIssueRefsForPRBodyIsIdempotent(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := d.UpdateRunClosingIssueRefs(run.ID, []string{"42"}); err != nil {
+		t.Fatalf("update closing issue references: %v", err)
+	}
+
+	first, err := d.ClaimClosingIssueRefsForPRBody(run.ID)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	second, err := d.ClaimClosingIssueRefsForPRBody(run.ID)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if strings.Join(first, ",") != "42" || strings.Join(second, ",") != "42" {
+		t.Fatalf("claims = %q/%q, want 42/42", first, second)
+	}
+}
+
+// Exactly one of N concurrent reattach updates racing a claim may report
+// success, and the composed body must carry whatever the claim returned.
+func TestUpdateRunClosingIssueRefsConcurrentWithClaimNeverReportsAPhantomWrite(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	accepted := 0
+	var claimed []string
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		got, err := d.ClaimClosingIssueRefsForPRBody(run.ID)
+		if err != nil {
+			t.Errorf("claim closing issue references: %v", err)
+			return
+		}
+		mu.Lock()
+		claimed = got
+		mu.Unlock()
+	}()
+	go func() {
+		defer wg.Done()
+		switch err := d.UpdateRunClosingIssueRefs(run.ID, []string{"42"}); {
+		case err == nil:
+			mu.Lock()
+			accepted++
+			mu.Unlock()
+		case errors.Is(err, ErrClosingIssueRefsLocked):
+			// Correctly refused: it lost the race to the claim.
+		default:
+			t.Errorf("update closing issue references: %v", err)
+		}
+	}()
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	// The invariant: a reported success must be visible to the PR body.
+	if accepted == 1 && strings.Join(claimed, ",") != "42" {
+		t.Fatalf("update reported success but claim saw %q: the PR body would omit the reference", claimed)
+	}
+	if accepted == 0 && len(claimed) != 0 {
+		t.Fatalf("update was refused but claim saw %q", claimed)
+	}
+}
+
+func TestUpdateRunClosingIssueRefsClearsBlankValue(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := d.UpdateRunClosingIssueRefs(run.ID, []string{"42"}); err != nil {
+		t.Fatalf("set closing issue references: %v", err)
+	}
+
+	if err := d.UpdateRunClosingIssueRefs(run.ID, nil); err != nil {
+		t.Fatalf("clear closing issue references: %v", err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if len(got.ClosingIssueRefs) != 0 {
+		t.Fatalf("closing issue references = %#v, want empty", got.ClosingIssueRefs)
+	}
+}
+
+func TestUpdateRunClosingIssueRefsRejectsNonDecimalInput(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+
+	if err := d.UpdateRunClosingIssueRefs(run.ID, []string{"42 Fixes #99"}); err == nil {
+		t.Fatal("expected malformed closing issue references to fail")
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if len(got.ClosingIssueRefs) != 0 {
+		t.Fatalf("invalid closing issue references were persisted: %#v", got.ClosingIssueRefs)
 	}
 }
 
@@ -809,6 +1110,76 @@ func TestVerifyTerminalRunHeadRewriteUsesRecordedReviewCAS(t *testing.T) {
 	got, err = d.GetRun(run.ID)
 	if err != nil || got.HeadSHA != "live" || got.TerminalHeadVerifiedAt == nil {
 		t.Fatalf("successful CAS did not verify live head = %#v, %v", got, err)
+	}
+}
+
+func TestVerifyTerminalRunRecordedHeadIsACompareAndSwap(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/tmp/terminal-recorded-cas", "https://example.com/terminal-recorded-cas", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "submitted", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunHeadSHA(run.ID, "recorded"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunReviewApprovedHeadSHA(run.ID, "reviewed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	for name, args := range map[string][3]any{
+		"status":    {types.RunCancelled, "recorded", "reviewed"},
+		"head":      {types.RunFailed, "other", "reviewed"},
+		"authority": {types.RunFailed, "recorded", "other"},
+	} {
+		if updated, err := d.VerifyTerminalRunRecordedHead(run.ID, args[0].(types.RunStatus), args[1].(string), args[2].(string)); err != nil || updated {
+			t.Fatalf("%s mismatch CAS = %t, %v", name, updated, err)
+		}
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil || got.HeadSHA != "recorded" || got.TerminalHeadVerifiedAt != nil {
+		t.Fatalf("failed CAS changed run = %#v, %v", got, err)
+	}
+	if updated, err := d.VerifyTerminalRunRecordedHead(run.ID, types.RunFailed, "recorded", "reviewed"); err != nil || !updated {
+		t.Fatalf("matching CAS = %t, %v", updated, err)
+	}
+	got, err = d.GetRun(run.ID)
+	if err != nil || got.HeadSHA != "recorded" || got.TerminalHeadVerifiedAt == nil || got.Status != types.RunFailed {
+		t.Fatalf("successful CAS did not verify the recorded head in place = %#v, %v", got, err)
+	}
+	if updated, err := d.VerifyTerminalRunRecordedHead(run.ID, types.RunFailed, "recorded", "reviewed"); err != nil || updated {
+		t.Fatalf("already-verified CAS = %t, %v", updated, err)
+	}
+
+	// A run whose custody was already returned is never re-stamped, even when
+	// every other predicate matches.
+	returned, err := d.InsertRun(repo.ID, "feature-returned", "submitted", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunHeadSHA(returned.ID, "recorded"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunReviewApprovedHeadSHA(returned.ID, "reviewed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(returned.ID, types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetRunCustodyReturned(returned.ID); err != nil {
+		t.Fatal(err)
+	}
+	if updated, err := d.VerifyTerminalRunRecordedHead(returned.ID, types.RunFailed, "recorded", "reviewed"); err != nil || updated {
+		t.Fatalf("custody-returned CAS = %t, %v", updated, err)
+	}
+	got, err = d.GetRun(returned.ID)
+	if err != nil || got.TerminalHeadVerifiedAt != nil || got.CustodyReturnedAt == nil {
+		t.Fatalf("custody-returned CAS changed run = %#v, %v", got, err)
 	}
 }
 

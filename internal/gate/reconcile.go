@@ -18,9 +18,10 @@ type StaleBranchReconciliation struct {
 }
 
 // StaleBranchPlan is the verdict of a non-mutating stale-branch inspection.
-// Planning checks containment or the exact run-owned-head policy exception
-// without touching any ref, so a caller can decide before it publishes anything;
-// applying the plan is the only step that archives and removes the branch.
+// Planning checks containment, recovery-anchor preservation, or the exact
+// run-owned-head policy exception without touching any ref, so a caller can
+// decide before it publishes anything; applying the plan is the only step that
+// archives and removes the branch.
 type StaleBranchPlan struct {
 	PreserveDescendantOf string
 	Reconcile            bool
@@ -28,11 +29,17 @@ type StaleBranchPlan struct {
 	BranchRef            string
 	PreviousHead         string
 	ArchiveTag           string
+	// PreservedByRecovery names the recovery anchor that keeps each
+	// private-only commit reachable for commits this plan excluded from the
+	// at-risk set on that basis. Keyed by full commit ID. Empty when no commit
+	// needed the recovery-anchor credit.
+	PreservedByRecovery map[string]string
 }
 
 // ReconcileStaleBranch plans and immediately applies stale private gate branch
 // reconciliation. It removes the branch only after Git proves the live head
-// contains all of its content, or under the exact run-owned-head exception
+// contains all of its content or a recovery anchor preserves each private-only
+// commit that proof misses, or under the exact run-owned-head exception
 // described in docs/src/content/docs/concepts/gate-model.md.
 func ReconcileStaleBranch(ctx context.Context, gateDir, workDir, branch, liveHead, runOwnedHead string) (StaleBranchReconciliation, error) {
 	plan, err := PlanStaleBranchReconciliation(ctx, gateDir, workDir, branch, liveHead, runOwnedHead)
@@ -45,10 +52,12 @@ func ReconcileStaleBranch(ctx context.Context, gateDir, workDir, branch, liveHea
 // PlanStaleBranchReconciliation inspects a private gate branch and reports
 // whether it must be archived and removed before the live head can enter
 // through an ordinary push. It mutates no ref: outside the run-owned-head
-// exception, an unproven private head is refused before publication.
+// exception, a private head carrying a private-only commit that is neither
+// proven to survive nor preserved by a recovery anchor is refused before
+// publication.
 //
-// Rewritten histories require both stable per-file patch identities and final
-// tree survival. runOwnedHead is a policy exception, not containment evidence:
+// Rewritten histories require final-tree survival, proven by a tree-preserving
+// merge rather than by per-commit patch identity. runOwnedHead is a policy exception, not containment evidence:
 // fresh submissions must leave it empty, and pipeline publication goes through
 // PlanMirrorPublicationReconciliation instead. The contract and rationale are
 // owned by docs/src/content/docs/concepts/gate-model.md (Private mirror
@@ -63,7 +72,8 @@ func PlanStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 // placed on the private mirror - Run.SubmittedHeadSHA and, once the run has
 // published, its durable Run.LastPushedSHA - and nothing else. Neither an
 // agent-created head nor any other recorded head is eligible; every other
-// mirror head still needs the full preservation proof.
+// mirror head still needs the full preservation proof or the recovery-anchor
+// preservation credit.
 func PlanMirrorPublicationReconciliation(ctx context.Context, gateDir, workDir, branch, liveHead string, runOwnedHeads ...string) (StaleBranchPlan, error) {
 	return planStaleBranchReconciliation(ctx, gateDir, workDir, branch, liveHead, true, runOwnedHeads...)
 }
@@ -131,9 +141,30 @@ func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 		if err != nil {
 			return plan, fmt.Errorf("compare private mirror content for %s: %w", branchRef, err)
 		}
-		if len(atRiskCommits) > 0 {
-			atRisk := make([]string, 0, len(atRiskCommits))
-			for _, commit := range atRiskCommits {
+		// Recovery anchors are the tool's own sanctioned preservation record:
+		// terminalization pins every verified unpublished head at
+		// refs/no-mistakes/recover/<run>, and PreserveRecoveryAnchor never
+		// replaces evidence (a conflicting anchor fails closed). A commit that
+		// one of those anchors keeps reachable is not at risk of being lost, so
+		// it is re-derived out of the at-risk set instead of deadlocking the
+		// recover -> rerun -> push loop that wrote the anchor in the first
+		// place. This is a preservation credit, not containment evidence: the
+		// surviving content still has to be proven by the checks above for any
+		// commit no anchor holds.
+		satisfiers := reconcileSatisfiers(runOwnedHeads)
+		preserved, err := preservedByRecoveryAnchors(ctx, gateDir, liveHead, atRiskCommits)
+		if err != nil {
+			return plan, fmt.Errorf("inspect recovery anchors for %s: %w", branchRef, err)
+		}
+		remaining := make([]string, 0, len(atRiskCommits))
+		for _, commit := range atRiskCommits {
+			if _, ok := preserved[commit]; !ok {
+				remaining = append(remaining, commit)
+			}
+		}
+		if len(remaining) > 0 {
+			atRisk := make([]string, 0, len(remaining))
+			for _, commit := range remaining {
 				description, describeErr := git.Run(ctx, gateDir, "show", "-s", "--format=%H %s", commit)
 				if describeErr != nil {
 					return plan, fmt.Errorf("describe at-risk private mirror commit %s: %w", commit, describeErr)
@@ -141,10 +172,13 @@ func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 				atRisk = append(atRisk, description)
 			}
 			return plan, fmt.Errorf(
-				"refusing to reconcile private mirror ref %s: %d at-risk commit(s) contain content absent from live head %s: %s",
-				branchRef, len(atRisk), liveHead, strings.Join(atRisk, "; "),
+				"refusing to reconcile private mirror ref %s: %d at-risk commit(s) contain content absent from live head %s: %s. "+
+					"Clears on any of: %s",
+				branchRef, len(remaining), liveHead, strings.Join(atRisk, "; "),
+				joinSatisfiers(satisfiers),
 			)
 		}
+		plan.PreservedByRecovery = preserved
 	}
 
 	return StaleBranchPlan{
@@ -154,6 +188,7 @@ func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 		BranchRef:            branchRef,
 		PreviousHead:         gateHead,
 		ArchiveTag:           archiveTag,
+		PreservedByRecovery:  plan.PreservedByRecovery,
 	}, nil
 }
 
@@ -163,6 +198,16 @@ func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 func isRunOwnedHead(gateHead string, runOwnedHeads []string) bool {
 	for _, owned := range runOwnedHeads {
 		if owned = strings.TrimSpace(owned); owned != "" && owned == gateHead {
+			return true
+		}
+	}
+	return false
+}
+
+// hasRunOwnedHead reports whether the caller supplied any run-owned head.
+func hasRunOwnedHead(runOwnedHeads []string) bool {
+	for _, owned := range runOwnedHeads {
+		if strings.TrimSpace(owned) != "" {
 			return true
 		}
 	}
@@ -263,16 +308,148 @@ func ArchivedHeadRecorded(ctx context.Context, gateDir, branch, head string) boo
 	return err == nil && objectType == "commit"
 }
 
-// privateCommitsAbsentFromLive names private-only commits lacking matching
-// per-file patches, or the entire private-only range when final-tree survival
-// cannot be proven.
+// recoveryAnchorPrefix is the ref namespace terminalization pins a run's
+// unpublished pipeline head to (custody.RecoveryRef). An anchor is created only
+// by the guarded custody path and never replaced: PreserveRecoveryAnchor
+// creates it with an expected-old-value of the zero ID and fails closed on any
+// conflicting existing ref, so a commit reachable from one is held by
+// deliberate, immutable preservation evidence rather than by accident.
+const recoveryAnchorPrefix = "refs/no-mistakes/recover/"
+
+type recoveryAnchor struct {
+	ref  string
+	head string
+}
+
+// listRecoveryAnchors returns the direct commit targets under
+// refs/no-mistakes/recover/. for-each-ref reports a direct commit ref as
+// exactly three fields and a symbolic ref with a fourth %(symref) field, so a
+// symbolic, zero, or non-commit target is skipped rather than dereferenced:
+// it contributes no preservation evidence, and skipping is the conservative
+// direction (nothing gets credited).
+func listRecoveryAnchors(ctx context.Context, gateDir string) ([]recoveryAnchor, error) {
+	out, err := git.Run(ctx, gateDir, "for-each-ref", "--format=%(refname) %(objectname) %(objecttype) %(symref)", recoveryAnchorPrefix)
+	if err != nil {
+		return nil, err
+	}
+	var anchors []recoveryAnchor
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 3 || fields[2] != "commit" {
+			continue
+		}
+		ref, head := fields[0], fields[1]
+		if git.IsZeroSHA(head) {
+			continue
+		}
+		anchors = append(anchors, recoveryAnchor{ref: ref, head: head})
+	}
+	return anchors, nil
+}
+
+// reconcileSatisfiers names the proofs that can clear a reconciliation refusal
+// in this call shape, so the refusal is actionable instead of a dead end. The
+// recovery-anchor credit is always last.
+func reconcileSatisfiers(runOwnedHeads []string) []string {
+	satisfiers := []string{
+		"the live head descending from the private head (ancestry)",
+		"tree-survival proof (a tree-preserving merge placing the content in the live history)",
+	}
+	if hasRunOwnedHead(runOwnedHeads) {
+		satisfiers = append(satisfiers, "the private head being exactly the publishing run's Run.SubmittedHeadSHA or Run.LastPushedSHA (Decision 41-A)")
+	}
+	return append(satisfiers, "a refs/no-mistakes/recover/<run> recovery anchor reaching the commit")
+}
+
+func joinSatisfiers(satisfiers []string) string {
+	if len(satisfiers) == 1 {
+		return satisfiers[0]
+	}
+	return strings.Join(satisfiers[:len(satisfiers)-1], "; ") + "; or " + satisfiers[len(satisfiers)-1]
+}
+
+// maxRecoveryCandidates bounds how many candidate commits one recovery-anchor
+// membership scan passes to git, keeping each rev-list argument list bounded.
+// Larger candidate sets are scanned in successive batches, never truncated or
+// refused: dropping any candidate would silently drop its preservation credit
+// and reintroduce the deadlock this credit exists to prevent.
+const maxRecoveryCandidates = 512
+
+// preservedByRecoveryAnchors reports, for each candidate commit only, a
+// recovery anchor that keeps it reachable in the gate repository. Reachable
+// means reachable: the anchor's history contains the commit, so the object and
+// its history survive whatever happens to the private branch ref.
 //
-// The private side is computed first so the live scan can be bounded to the
-// paths the private commits actually touch. Comparison stops at the first
-// unmatched patch within each commit, but visits every private-only commit.
-// A rebased live head otherwise carries every default-branch
-// commit since the merge base, and hashing each of those files would cost
-// thousands of git invocations to answer a question about a handful of paths.
+// The membership scan excludes liveHead as well as the anchors. The candidates
+// are private-only commits, so that walk is bounded by the private-only range
+// rather than by the history the anchors or the live branch can see; anchors
+// accumulate for the life of the gate. Attribution then probes anchors only for
+// the credited commits, stopping at the first anchor that covers each.
+//
+// This is a PRESERVATION credit only. It says nothing about whether the content
+// lands in the published tree, which the ancestry and tree-survival
+// checks are responsible for proving. It exists so that the sanctioned
+// recover -> rerun -> push loop cannot deadlock against the very anchor that
+// loop wrote to declare the work preserved.
+func preservedByRecoveryAnchors(ctx context.Context, gateDir, liveHead string, commits []string) (map[string]string, error) {
+	preserved := make(map[string]string)
+	if len(commits) == 0 {
+		return preserved, nil
+	}
+	anchors, err := listRecoveryAnchors(ctx, gateDir)
+	if err != nil {
+		return nil, err
+	}
+	if len(anchors) == 0 {
+		return preserved, nil
+	}
+	anchorHeads := make([]string, 0, len(anchors))
+	for _, anchor := range anchors {
+		anchorHeads = append(anchorHeads, anchor.head)
+	}
+
+	// One scan per batch: the candidates NO anchor reaches. Its complement is
+	// preserved.
+	unreachedSet := make(map[string]bool)
+	for start := 0; start < len(commits); start += maxRecoveryCandidates {
+		batch := commits[start:min(start+maxRecoveryCandidates, len(commits))]
+		args := make([]string, 0, len(batch)+len(anchorHeads)+2)
+		args = append(args, batch...)
+		args = append(args, "--not", liveHead)
+		args = append(args, anchorHeads...)
+		unreached, err := commitList(ctx, gateDir, args...)
+		if err != nil {
+			return nil, err
+		}
+		for _, commit := range unreached {
+			unreachedSet[commit] = true
+		}
+	}
+	for _, commit := range commits {
+		if unreachedSet[commit] {
+			continue
+		}
+		// Attribution only, for the credited commits, stopping at the first
+		// anchor that covers each one.
+		for _, anchor := range anchors {
+			if _, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", commit, anchor.head); err == nil {
+				preserved[commit] = anchor.ref
+				break
+			}
+		}
+	}
+	return preserved, nil
+}
+
+// privateCommitsAbsentFromLive returns nil when the private head's content is
+// proven to survive in the live history, and the entire private-only range
+// otherwise. A clean merge of the private head into the live head that leaves
+// the live tree unchanged proves every commit contained, including a rebased
+// copy whose patch ID differs only by context the base moved; when that merge
+// conflicts, privateTreeSurvives proves survival instead. Both are whole-tree
+// proofs, so a commit's own patch ID is never required to match: a rebase that
+// moved context and a later live edit of the copied lines would otherwise
+// refuse content that demonstrably landed.
 func privateCommitsAbsentFromLive(ctx context.Context, repoDir, liveHead, privateHead string) ([]string, error) {
 	privateOnly, err := commitList(ctx, repoDir, "--right-only", liveHead+"..."+privateHead)
 	if err != nil {
@@ -281,108 +458,103 @@ func privateCommitsAbsentFromLive(ctx context.Context, repoDir, liveHead, privat
 	if len(privateOnly) == 0 {
 		return nil, nil
 	}
-
-	type privateCommit struct {
-		sha        string
-		patches    []string
-		comparable bool
+	if contained, err := mergeLeavesTree(ctx, repoDir, liveHead, privateHead); err != nil || contained {
+		return nil, err
 	}
-	privateCommits := make([]privateCommit, 0, len(privateOnly))
+	paths, err := privateOnlyPaths(ctx, repoDir, privateOnly)
+	if err != nil {
+		return nil, err
+	}
+	survives, err := privateTreeSurvives(ctx, repoDir, liveHead, privateHead, paths)
+	if err != nil {
+		return nil, err
+	}
+	if survives {
+		return nil, nil
+	}
+	return privateOnly, nil
+}
+
+// privateOnlyPaths names the paths the private-only commits touch, bounding
+// the live scan for a survival point to those paths. A merge commit
+// contributes no paths of its own: its combined meaning is not safely
+// represented by first-parent patches.
+func privateOnlyPaths(ctx context.Context, repoDir string, commits []string) (map[string]bool, error) {
 	paths := make(map[string]bool)
-	for _, commit := range privateOnly {
-		patches, comparable, err := perFilePatchIDs(ctx, repoDir, commit)
+	for _, commit := range commits {
+		rawPaths, err := git.RunRaw(ctx, repoDir, "diff-tree", "--root", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z", commit)
 		if err != nil {
 			return nil, err
 		}
-		privateCommits = append(privateCommits, privateCommit{sha: commit, patches: patches, comparable: comparable})
-		if !comparable {
-			continue
-		}
-		for _, patch := range patches {
-			path, _, ok := strings.Cut(patch, "\x00")
-			if ok {
-				paths[path] = true
+		for _, rawPath := range strings.Split(strings.TrimSuffix(string(rawPaths), "\x00"), "\x00") {
+			if rawPath != "" {
+				paths[rawPath] = true
 			}
 		}
 	}
-
-	livePatches, err := liveSidePatchIDs(ctx, repoDir, liveHead, privateHead, paths)
-	if err != nil {
-		return nil, err
-	}
-
-	var atRisk []string
-	for _, commit := range privateCommits {
-		if !commit.comparable {
-			atRisk = append(atRisk, commit.sha)
-			continue
-		}
-		remaining := make(map[string]int, len(livePatches))
-		for patch, count := range livePatches {
-			remaining[patch] = count
-		}
-		represented := true
-		for _, patch := range commit.patches {
-			if remaining[patch] == 0 {
-				represented = false
-				break
-			}
-			remaining[patch]--
-		}
-		if !represented {
-			atRisk = append(atRisk, commit.sha)
-			continue
-		}
-		for patch, count := range remaining {
-			livePatches[patch] = count
-		}
-	}
-	mergedTree, mergeErr := git.Run(ctx, repoDir, "merge-tree", "--write-tree", liveHead, privateHead)
-	if mergeErr != nil {
-		return privateOnly, nil
-	}
-	liveTree, err := git.Run(ctx, repoDir, "rev-parse", "--verify", liveHead+"^{tree}")
-	if err != nil {
-		return nil, err
-	}
-	if mergedTree != liveTree {
-		return privateOnly, nil
-	}
-	return atRisk, nil
+	return paths, nil
 }
 
-// liveSidePatchIDs collects per-file patch identities from the live-only
-// history, restricted to the paths the private side needs proven.
-func liveSidePatchIDs(ctx context.Context, repoDir, liveHead, privateHead string, paths map[string]bool) (map[string]int, error) {
-	livePatches := make(map[string]int)
+// maxSurvivalCandidates bounds the first-parent live commits tried as
+// survival points. Past it the proof fails closed.
+const maxSurvivalCandidates = 64
+
+// privateTreeSurvives proves the private head's changes are present in the
+// live history once the direct proof, a clean three-way merge of the private
+// head into the live head that leaves the live tree unchanged, has failed.
+//
+// A rebased branch whose later live commits edit the lines the private commits
+// wrote fails that proof by conflicting although nothing was dropped, so this
+// proof has two halves. Resolving each conflicting hunk toward the live
+// head must still leave the live tree unchanged, so every private hunk that
+// merges cleanly is already live and a change the live head reverted or lacks
+// still refuses. And some first-parent live commit touching the private paths
+// must pass the direct proof, placing all of the private content in the live
+// history. First-parent only, so a merge that discarded a side branch never
+// serves as that point.
+func privateTreeSurvives(ctx context.Context, repoDir, liveHead, privateHead string, paths map[string]bool) (bool, error) {
 	if len(paths) == 0 {
-		return livePatches, nil
+		return false, nil
 	}
-	args := []string{"--full-history", "--left-only", liveHead + "..." + privateHead, "--"}
+	if ok, err := mergeLeavesTree(ctx, repoDir, liveHead, privateHead, "-X", "ours"); err != nil || !ok {
+		return false, err
+	}
+	args := []string{"--first-parent", liveHead, "^" + privateHead, "--"}
 	for path := range paths {
 		args = append(args, ":(literal)"+path)
 	}
-	liveOnly, err := commitList(ctx, repoDir, args...)
+	candidates, err := commitList(ctx, repoDir, args...)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
-	for _, commit := range liveOnly {
-		patches, comparable, err := perFilePatchIDs(ctx, repoDir, commit)
-		if err != nil {
-			return nil, err
+	for i, candidate := range candidates {
+		if i == maxSurvivalCandidates {
+			break
 		}
-		if !comparable {
+		if candidate == liveHead {
 			continue
 		}
-		for _, patch := range patches {
-			path, _, ok := strings.Cut(patch, "\x00")
-			if !ok || !paths[path] {
-				continue
-			}
-			livePatches[patch]++
+		if ok, err := mergeLeavesTree(ctx, repoDir, candidate, privateHead); err != nil || ok {
+			return ok, err
 		}
 	}
-	return livePatches, nil
+	return false, nil
+}
+
+// mergeLeavesTree reports whether merging privateHead into liveCommit with the
+// given merge options is clean and leaves liveCommit's tree unchanged. A Git
+// too old for an option fails the merge, and so the proof.
+func mergeLeavesTree(ctx context.Context, repoDir, liveCommit, privateHead string, options ...string) (bool, error) {
+	args := append([]string{"merge-tree", "--write-tree"}, options...)
+	mergedTree, mergeErr := git.Run(ctx, repoDir, append(args, liveCommit, privateHead)...)
+	if mergeErr != nil {
+		return false, nil
+	}
+	liveTree, err := git.Run(ctx, repoDir, "rev-parse", "--verify", liveCommit+"^{tree}")
+	if err != nil {
+		return false, err
+	}
+	return mergedTree == liveTree, nil
 }
 
 func commitList(ctx context.Context, repoDir string, args ...string) ([]string, error) {
@@ -391,39 +563,4 @@ func commitList(ctx context.Context, repoDir string, args ...string) ([]string, 
 		return nil, err
 	}
 	return strings.Fields(out), nil
-}
-
-func perFilePatchIDs(ctx context.Context, repoDir, commit string) ([]string, bool, error) {
-	parentLine, err := git.Run(ctx, repoDir, "rev-list", "--parents", "-n", "1", commit)
-	if err != nil {
-		return nil, false, err
-	}
-	parents := strings.Fields(parentLine)
-	if len(parents) > 2 {
-		// A merge's combined meaning is not safely represented by first-parent
-		// patches. It remains at risk unless direct ancestry proved containment.
-		return nil, false, nil
-	}
-	parent := git.EmptyTreeSHA
-	if len(parents) == 2 {
-		parent = parents[1]
-	}
-	rawPaths, err := git.RunRaw(ctx, repoDir, "diff-tree", "--root", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z", commit)
-	if err != nil {
-		return nil, false, err
-	}
-	var patches []string
-	for _, rawPath := range strings.Split(strings.TrimSuffix(string(rawPaths), "\x00"), "\x00") {
-		if rawPath == "" {
-			continue
-		}
-		patchID, err := git.StablePatchID(ctx, repoDir, parent, commit, rawPath)
-		if err != nil {
-			return nil, false, err
-		}
-		if patchID != "" {
-			patches = append(patches, rawPath+"\x00"+patchID)
-		}
-	}
-	return patches, true, nil
 }

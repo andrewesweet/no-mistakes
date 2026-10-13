@@ -96,17 +96,65 @@ work unchanged.
 ### Private mirror reconciliation
 
 A rebase can leave the gate branch on an older history that rejects the next
-ordinary push. Reconciliation compares exact commit heads and per-file
-`git patch-id --stable` identities; commit messages are not evidence. Historical
-patch matches also require a clean three-way merge of the private head into the
-live head whose resulting tree equals the live tree. This prevents changes
-discarded by a merge or revert from being counted as surviving content. If that
-survival check cannot prove preservation, the private-only range is reported
-as at risk.
+ordinary push. Reconciliation compares exact commit heads and final-tree
+survival; commit messages and per-commit patch identities are not evidence. A
+clean three-way merge of the private head into the live head whose resulting
+tree equals the live tree proves every private commit contained, so a rebased
+copy whose patch ID changed only because the new base edited nearby context
+lines is not at risk, while changes discarded by a merge or revert are never
+counted as surviving content.
+
+A rebased branch whose later commits edit the lines the private commits wrote
+(for example a new run on a branch an earlier run already published) makes that
+merge conflict although nothing was dropped. Survival is then proven in two
+halves instead: merging with every conflicting hunk resolved toward the live
+head must still leave the live tree unchanged, so a private hunk that merges
+cleanly - content the live head reverted or never had - still refuses; and a
+commit on the live head's first-parent history touching the private paths must
+pass the clean-merge check, placing all of the private content in the live
+history. A side branch discarded by a merge never serves as that point. Both
+halves prove the whole private head, so a rebased copy whose patch ID drifted
+with context and whose lines a later live commit edited is not at risk either.
+At most 64 first-parent candidates are tried; past that bound the proof fails
+closed.
+
+If survival cannot be proven, the whole private-only range is reported as at
+risk.
+
+**Recovery-anchor preservation credit (issue #1233):** a private-only commit
+that a `refs/no-mistakes/recover/<run>` anchor reaches is *preserved*, so it is
+re-derived out of the at-risk set. Those anchors are the tool's own sanctioned
+preservation record - terminalization pins every verified unpublished head at
+that ref before the managed worktree can be removed, and
+`custody.PreserveRecoveryAnchor` never replaces evidence (a conflicting or
+symbolic anchor fails closed and is never dereferenced). The credit exists so
+the sanctioned `sync --recover` -> rerun -> push loop cannot deadlock against
+the very anchor that loop wrote to declare the work preserved.
+
+This is a **preservation credit, not containment evidence**. It says nothing
+about whether the content lands in the published tree; ancestry and
+final-tree survival remain the only proofs of that, and Decision
+41-A below remains the only head exception. The archive-before-delete contract
+is unchanged, so a credited reconciliation still archives the exact private
+head before removing the branch ref. A commit no anchor reaches is still
+refused, and the refusal names every proof that would clear it.
+
+The credit scan never walks what the anchors can see. Recovery anchors
+accumulate for the life of the gate, so each membership scan is a `git
+rev-list` of candidates that excludes the live head as well as every
+anchor; because the candidates are private-only, that walk is bounded by the
+private-only range. Only credited commits are then attributed to the first
+anchor that reaches them. When no recovery anchor exists no credit is possible
+and the ordinary at-risk refusal is returned. Otherwise the candidates are
+scanned in successive batches of `maxRecoveryCandidates` (in
+`internal/gate/reconcile.go`), so a long, fully anchored history still earns
+its credit; the scan is never truncated or refused by size, because dropping
+candidates would drop their preservation credit and silently reintroduce the
+deadlock the credit exists to end.
 
 **Accepted Decision 41-A (issue #983):** pipeline publication may replace a
 private mirror head that is **exactly equal to a head the publishing run itself
-placed on the mirror** without patch-ID or tree-survival proof: its
+placed on the mirror** without tree-survival proof: its
 `Run.SubmittedHeadSHA`, or, once it has published, its durable
 `Run.LastPushedSHA`. The last pushed head is recorded only after a verified push to the configured
 push target and mirror settlement, so it is never an external or newer head.
@@ -123,12 +171,12 @@ Reconciliation requires direct private branch and archive refs; symbolic refs,
 including dangling symbolic refs, are refused before containment checks. Ref
 creation and deletion use exact names without dereferencing and expected old
 values. Before deleting a reconciled branch ref, the gate archives its exact
-head at `refs/tags/no-mistakes-abandoned/<branch>/<sha>`. Outside Decision 41-A,
-unproven private content refuses before upstream publication, leaves the
-private branch untouched, and names every at-risk commit. An ancestor already
-supports an ordinary fast-forward. A gate head that is a newer descendant of
-the published head stays untouched, including through the detached worktree's
-shared branch refs.
+head at `refs/tags/no-mistakes-abandoned/<branch>/<sha>`. Outside Decision 41-A
+and the recovery-anchor credit above, unproven private content refuses before
+upstream publication, leaves the private branch untouched, and names every
+at-risk commit. An ancestor already supports an ordinary fast-forward. A gate
+head that is a newer descendant of the published head stays untouched,
+including through the detached worktree's shared branch refs.
 
 Correction and CI-repair recording persist the agent-created worktree head in
 the run and database without moving a branch ref shared with the gate. Repairs
