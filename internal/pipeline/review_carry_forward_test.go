@@ -893,8 +893,14 @@ func TestResolveVerifiedFindingsJSON(t *testing.T) {
 	// nearby, keeping the conservative fail-closed direction.
 	unpositionedSameFile := `{"findings":[{"id":"review-9","severity":"warning","file":"service.go","description":"same file, no line reported","action":"ask-user"}],"summary":"1 finding"}`
 
+	// Place the pending finding far enough from line 1 that both sides of the
+	// window use positive report lines and exercise proximity, not missing lines.
+	windowPending := strings.Replace(reviewCarryTwoFindings, `"line":10`, `"line":30`, 1)
+	unpositionedPending := strings.Replace(reviewCarryTwoFindings, `"line":10,`, "", 1)
+
 	cases := []struct {
 		name        string
+		outstanding string
 		thisRound   string
 		reviewed    []string
 		pending     []string
@@ -913,11 +919,20 @@ func TestResolveVerifiedFindingsJSON(t *testing.T) {
 		{name: "distant distinct finding in the same file clears", thisRound: distantDistinct, reviewed: []string{"service.go"}, pending: []string{"review-1"}, wantCleared: true},
 		{name: "near restatement in the same file stays outstanding", thisRound: nearRestatement, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
 		{name: "same-file report with no line stays outstanding", thisRound: unpositionedSameFile, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
+		{name: "same-file report at offset -10 stays outstanding", outstanding: windowPending, thisRound: `{"findings":[{"id":"review-9","severity":"warning","file":"service.go","line":20,"description":"reworded concern above the pending finding","action":"ask-user"}]}`, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
+		{name: "same-file report at offset +10 stays outstanding", outstanding: windowPending, thisRound: `{"findings":[{"id":"review-9","severity":"warning","file":"service.go","line":40,"description":"reworded concern below the pending finding","action":"ask-user"}]}`, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
+		{name: "same-file report at offset -11 clears", outstanding: windowPending, thisRound: `{"findings":[{"id":"review-9","severity":"warning","file":"service.go","line":19,"description":"distinct concern above the pending finding","action":"ask-user"}]}`, reviewed: []string{"service.go"}, pending: []string{"review-1"}, wantCleared: true},
+		{name: "same-file report at offset +11 clears", outstanding: windowPending, thisRound: `{"findings":[{"id":"review-9","severity":"warning","file":"service.go","line":41,"description":"distinct concern below the pending finding","action":"ask-user"}]}`, reviewed: []string{"service.go"}, pending: []string{"review-1"}, wantCleared: true},
+		{name: "pending finding with no line against a positioned same-file report stays outstanding", outstanding: unpositionedPending, thisRound: distantDistinct, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := resolveVerifiedFindingsJSON(reviewCarryTwoFindings, tc.pending, tc.reviewed, []string{"service.go", "cache.go"}, tc.thisRound)
+			outstanding := tc.outstanding
+			if outstanding == "" {
+				outstanding = reviewCarryTwoFindings
+			}
+			got := resolveVerifiedFindingsJSON(outstanding, tc.pending, tc.reviewed, []string{"service.go", "cache.go"}, tc.thisRound)
 			parsed, err := types.ParseFindingsJSON(got)
 			if err != nil {
 				t.Fatalf("parse result: %v", err)
