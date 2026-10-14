@@ -1622,10 +1622,11 @@ func TestExecutor_ReviewCarryForward_AnEmptyOutstandingSetRecordsNoRetraction(t 
 	waitExecutorDone(t, done)
 }
 
-// waitForFindings blocks until the step's persisted findings carry marker. The
-// gate status alone cannot say a round landed when consecutive rounds park the
+// waitForFindings blocks until the step parks with findings carrying marker.
+// The gate status alone cannot say a round landed when consecutive rounds park the
 // same way, which is how an earlier version of these tests read a pre-round
-// snapshot and passed vacuously.
+// snapshot and passed vacuously. Findings alone arrive before the executor opens
+// the gate, so both must be observed before responding.
 func waitForFindings(t *testing.T, database *db.DB, runID, marker string) []*db.StepResult {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
@@ -1635,7 +1636,9 @@ func waitForFindings(t *testing.T, database *db.DB, runID, marker string) []*db.
 			t.Fatal(err)
 		}
 		if len(steps) > 0 && steps[0].FindingsJSON != nil && strings.Contains(*steps[0].FindingsJSON, marker) {
-			return steps
+			if steps[0].Status == types.StepStatusAwaitingApproval || steps[0].Status == types.StepStatusFixReview {
+				return steps
+			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the round carrying %q never landed", marker)
@@ -1644,9 +1647,10 @@ func waitForFindings(t *testing.T, database *db.DB, runID, marker string) []*db.
 	}
 }
 
-// waitForRounds blocks until the step has persisted at least want rounds. A
-// round that reports nothing changes no marker, so its row is the only place
-// its arrival is visible.
+// waitForRounds blocks until the step is parked after persisting at least want
+// rounds. A round that reports nothing changes no marker, so its row is the only
+// place its arrival is visible. That row precedes approval readiness, so the
+// parked status must also be observed before responding.
 func waitForRounds(t *testing.T, database *db.DB, stepResultID string, want int) []*db.StepRound {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
@@ -1656,7 +1660,13 @@ func waitForRounds(t *testing.T, database *db.DB, stepResultID string, want int)
 			t.Fatal(err)
 		}
 		if len(rounds) >= want {
-			return rounds
+			step, err := database.GetStepResult(stepResultID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if step != nil && (step.Status == types.StepStatusAwaitingApproval || step.Status == types.StepStatusFixReview) {
+				return rounds
+			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("only %d of %d rounds landed", len(rounds), want)
