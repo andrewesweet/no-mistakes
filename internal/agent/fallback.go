@@ -8,12 +8,26 @@ import (
 )
 
 type fallbackAgent struct {
-	agents []Agent
+	agents      []Agent
+	quotaSwitch bool
+}
+
+// FallbackOption customizes a fallback chain.
+type FallbackOption func(*fallbackAgent)
+
+// WithQuotaSwitch activates the quota-aware mid-run switch: a recognised
+// quota-exhaustion error moves the run to the next agent in the chosen order
+// with a fresh session. Only quota routing turns this on; the plain launch
+// fallback never consumes a quota failure, preserving today's behavior when
+// the feature is off.
+func WithQuotaSwitch() FallbackOption {
+	return func(f *fallbackAgent) { f.quotaSwitch = true }
 }
 
 // NewFallback returns an Agent that tries each agent in order when an
-// invocation fails because the current agent process is unavailable.
-func NewFallback(agents []Agent) Agent {
+// invocation fails because the current agent process is unavailable, or -
+// with WithQuotaSwitch - when the active agent's subscription quota ran out.
+func NewFallback(agents []Agent, opts ...FallbackOption) Agent {
 	switch len(agents) {
 	case 0:
 		return nil
@@ -22,7 +36,11 @@ func NewFallback(agents []Agent) Agent {
 	default:
 		copied := make([]Agent, len(agents))
 		copy(copied, agents)
-		return &fallbackAgent{agents: copied}
+		f := &fallbackAgent{agents: copied}
+		for _, opt := range opts {
+			opt(f)
+		}
+		return f
 	}
 }
 
@@ -72,27 +90,44 @@ func (a *fallbackAgent) NeutralizesGateInstructions() bool {
 
 func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	candidates := a.agents
+	var sessionAgent Agent
 	if opts.Session != nil && opts.Session.ID != "" && opts.Session.Agent != "" {
-		candidates = nil
 		for _, current := range a.agents {
 			if SupportsSessionProvider(current, opts.Session.Agent) {
-				candidates = append(candidates, current)
+				sessionAgent = current
 				break
 			}
 		}
-		if len(candidates) == 0 {
+		if sessionAgent == nil {
 			return nil, fmt.Errorf("session provider %q is not configured", opts.Session.Agent)
+		}
+		// Without the quota switch the session provider is the only
+		// candidate, exactly as before. With it the whole chosen order
+		// stays eligible: only the session provider resumes the session,
+		// and once a switch fires the session is dropped entirely.
+		if !a.quotaSwitch {
+			candidates = []Agent{sessionAgent}
 		}
 	}
 	var lastErr error
+	sessionDropped := false
 	for i, current := range candidates {
 		if cause := context.Cause(ctx); cause != nil {
 			return nil, cause
 		}
 		currentOpts := opts
-		if currentOpts.Session != nil && currentOpts.Session.ID == "" && !SupportsSessionResume(current) {
-			currentOpts.Session = nil
-			currentOpts.SessionFallback = false
+		if currentOpts.Session != nil {
+			if currentOpts.Session.ID != "" {
+				if sessionDropped || current != sessionAgent {
+					// A different provider, or any agent after a
+					// quota switch, continues with a fresh session.
+					currentOpts.Session = nil
+					currentOpts.SessionFallback = false
+				}
+			} else if !SupportsSessionResume(current) {
+				currentOpts.Session = nil
+				currentOpts.SessionFallback = false
+			}
 		}
 		startedAt := time.Now()
 		result, err := current.Run(ctx, currentOpts)
@@ -115,11 +150,21 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 		if context.Cause(ctx) != nil {
 			return nil, err
 		}
-		if i == len(candidates)-1 || !isAgentUnavailableError(err) {
+		if i == len(candidates)-1 {
 			return nil, err
 		}
-		next := candidates[i+1]
-		emitAgentFallback(opts, current.Name(), next.Name(), err)
+		if isAgentUnavailableError(err) {
+			next := candidates[i+1]
+			emitAgentFallback(opts, current.Name(), next.Name(), err)
+			continue
+		}
+		if a.quotaSwitch && IsQuotaExhaustionError(err) {
+			next := candidates[i+1]
+			emitAgentQuotaSwitch(opts, current.Name(), next.Name(), err)
+			sessionDropped = true
+			continue
+		}
+		return nil, err
 	}
 	return nil, lastErr
 }
