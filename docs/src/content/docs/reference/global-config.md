@@ -287,6 +287,8 @@ OpenCode 2 receives both knobs in the model reference when the session is create
 OpenCode 1 receives them in the session message.
 Neither version receives model flags in the launch command, because `opencode serve` rejects them.
 
+An entry may also declare `quota_provider`: the quota-axi provider id [quota-aware routing](#quota_routing) reads this agent's evidence from. It is routing input, never a harness knob, and is read only when `quota_routing.enabled` is on. `claude` and `codex` never need it; `pi` pointing at a codex subscription does, unless its model already names the account (`codex-native/<model>` reads `codex-home`, `<account>/<model>` reads that account).
+
 `rovodev` and `antigravity` have no mechanism no-mistakes can set - `acli rovodev serve` plus its REST session API take no model parameter, and the `agy` CLI parses flags strictly - so `agent_config` for them is a config error rather than a request that quietly does nothing. Reach for [`agent_args_override`](#agent_args_override) there if your build of the CLI accepts a flag. Reasoning effort is likewise unavailable for ACP targets: no-mistakes drives them through `acpx`, which exposes `--model` but no effort surface. acpx also accepts only the model ids a target advertises over ACP; for `devin` that is a subset of `devin models list`, and [`acp_registry_overrides`](#acp_registry_overrides) is the escape hatch for the rest.
 
 `agent_config` is global-only. Like `agent_args_override`, it decides which model runs with your credentials, so an `agent_config` block in a repository's `.no-mistakes.yaml` is ignored. For first-class ACP aliases, `cursor` and `acp:cursor` share a profile, as do `devin` and `acp:devin`: the selected spelling's entry wins when both are configured; otherwise the other spelling's entry applies. This also applies to review-agent profiles.
@@ -843,6 +845,38 @@ When resume is unavailable or fails, the fix turn falls back to a cold run or a 
 Session identities are persisted only as minimum local resume metadata, never as prompts or transcripts; Pi's own session directory retains its native transcript. Keep Pi's session directory private, and keep any `--session-dir` or `PI_CODING_AGENT_SESSION_DIR` setting stable while a run is active so a daemon restart can find the fixer session.
 The [daemon crash-recovery reference](/no-mistakes/concepts/daemon/#crash-recovery) owns which parked gates can resume or reconcile after a restart.
 Set `false` to force every agent invocation cold.
+
+### quota_routing
+
+Opt-in, quota-aware agent ordering at run start.
+
+|         |                                          |
+| ------- | ---------------------------------------- |
+| Type    | `map[string]{enabled, expected_run_length, read_timeout, quota_axi_path}` |
+| Default | `enabled: false` (the feature is opt-in) |
+
+When `enabled: true`, no-mistakes reads **one** snapshot from the locally installed `quota-axi` tool at the start of each run and reorders the resolved agent list by quota evidence before the run picks its head agent:
+
+- An agent with concrete proof of exhaustion - runway `exhausted_now`, or a known `0%` remaining - is moved to the back of the list (it stays in the list, so the existing launch-failure fallback still has somewhere to go).
+- An agent whose runway is `projected_exhaustion` stays rankable only when the projected usable runway exceeds `expected_run_length`; otherwise it is treated like an exhausted one.
+- Runway `through_reset` passes.
+- Surviving agents rank by quota-axi's own `spendPriority` (the minimum across the scopes that apply to the agent's configured model); ties keep your configured order.
+- An agent with no readable quota evidence - its provider is unmeasured, or no provider mapping exists for it - stays eligible but ranks below every measured one.
+
+Each agent keeps its own [`agent_config`](#agent_config) model and effort: only the order changes. A missing, slow, or unreadable `quota-axi` keeps your configured order, logs the reason, and never blocks a run; nothing is sent anywhere - the snapshot is read from your local `quota-axi` and the outcome is recorded on the local run only (`no-mistakes axi status` shows the candidates, the evidence, and the choice).
+
+Mid-run, a recognised quota error on the active agent moves the run **once** to the next agent in the chosen order, with a fresh session (any resumed session is dropped), and it never moves back. The existing agent-unavailable fallback is unchanged.
+
+Subkeys:
+
+- `enabled` (bool, default `false`): the opt-in switch.
+- `expected_run_length` (duration, default `90m`): the runway floor. A projected exhaustion that outlasts this window does not demote the agent; the value is an expectation for ordering, never a run cancel.
+- `read_timeout` (duration, default `15s`): bound on the single quota-axi read at run start. Quota-axi may delegate an expired session's renewal to the vendor CLI that owns it, so a slow read waits up to this long before the run proceeds on the configured order.
+- `quota_axi_path` (string, default `quota-axi` on `PATH`): the executable to run.
+
+`quota_routing` is global-only: it decides which of this machine's credential-bearing agents a run spends, so a `quota_routing` block in a repository's `.no-mistakes.yaml` is a config error rather than an ignored key.
+
+Provider mapping: `claude` and `codex` map to their quota-axi providers automatically. Every other agent needs an explicit [`quota_provider`](#agent_config) under `agent_config`; an agent with neither keeps its configured position and produces one warning. Model names are never used to infer a provider - except that a `pi` model in `account/model` form names its own quota-axi account (`codex-native/…` reads the `codex-home` account), which is exactly the one inference that is safe because the account is named, not guessed.
 
 ### worktree_roots
 
