@@ -50,7 +50,7 @@ func TestFallbackQuotaSwitchMovesToTheNextAgentOnAQuotaError(t *testing.T) {
 		return &Result{Text: "ok"}, nil
 	}}
 	var events []LifecycleEvent
-	result, err := NewFallback([]Agent{claude, codex}, WithQuotaSwitch()).Run(context.Background(), RunOpts{
+	result, err := NewFallback([]Agent{claude, codex}, WithQuotaSwitch("")).Run(context.Background(), RunOpts{
 		OnLifecycle: func(event LifecycleEvent) { events = append(events, event) },
 	})
 	if err != nil {
@@ -95,7 +95,7 @@ func TestFallbackQuotaSwitchWalksTheWholeOrderAndNeverSwitchesBack(t *testing.T)
 	grok := &quotaTestAgent{name: "grok", run: func(RunOpts) (*Result, error) {
 		return &Result{Text: "ok"}, nil
 	}}
-	result, err := NewFallback([]Agent{claude, codex, grok}, WithQuotaSwitch()).Run(context.Background(), RunOpts{})
+	result, err := NewFallback([]Agent{claude, codex, grok}, WithQuotaSwitch("")).Run(context.Background(), RunOpts{})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -116,7 +116,7 @@ func TestFallbackQuotaSwitchContinuesWithAFreshSession(t *testing.T) {
 	codex := &quotaTestAgent{name: "codex", run: func(RunOpts) (*Result, error) {
 		return &Result{Text: "ok"}, nil
 	}}
-	result, err := NewFallback([]Agent{claude, codex}, WithQuotaSwitch()).Run(context.Background(), RunOpts{
+	result, err := NewFallback([]Agent{claude, codex}, WithQuotaSwitch("")).Run(context.Background(), RunOpts{
 		Session: &SessionRef{Agent: "claude", ID: "sess-1"},
 	})
 	if err != nil {
@@ -141,7 +141,7 @@ func TestFallbackQuotaSwitchDoesNotFireOnOtherErrors(t *testing.T) {
 	codex := &quotaTestAgent{name: "codex", run: func(RunOpts) (*Result, error) {
 		return nil, parseErr
 	}}
-	_, err := NewFallback([]Agent{claude, codex}, WithQuotaSwitch()).Run(context.Background(), RunOpts{})
+	_, err := NewFallback([]Agent{claude, codex}, WithQuotaSwitch("")).Run(context.Background(), RunOpts{})
 	if !errors.Is(err, parseErr) {
 		t.Fatalf("Run() error = %v, want %v: a non-quota terminal error never switches", err, parseErr)
 	}
@@ -157,7 +157,7 @@ func TestFallbackQuotaSwitchKeepsTheUnavailableFallbackAsItWas(t *testing.T) {
 	codex := &quotaTestAgent{name: "codex", run: func(RunOpts) (*Result, error) {
 		return &Result{Text: "ok"}, nil
 	}}
-	result, err := NewFallback([]Agent{claude, codex}, WithQuotaSwitch()).Run(context.Background(), RunOpts{})
+	result, err := NewFallback([]Agent{claude, codex}, WithQuotaSwitch("")).Run(context.Background(), RunOpts{})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -217,3 +217,95 @@ func TestIsQuotaExhaustionError_RejectsNonQuotaErrors(t *testing.T) {
 // A plain nil QuotaSwitch option keeps NewFallback's signature friendly to
 // existing callers and mirrors the pipeline's agent name type at the seam.
 var _ = types.AgentName("")
+
+func TestFallbackQuotaSwitchPersistsAcrossTurns(t *testing.T) {
+	first := &quotaTestAgent{name: "claude", resumable: true, providerOf: "claude", run: func(RunOpts) (*Result, error) {
+		return nil, errors.New("claude exited: quota exceeded")
+	}}
+	second := &quotaTestAgent{name: "codex", resumable: true, providerOf: "codex", run: func(RunOpts) (*Result, error) {
+		return &Result{Text: "ok"}, nil
+	}}
+	chain := NewFallback([]Agent{first, second}, WithQuotaSwitch(""))
+	for _, session := range []*SessionRef{{Agent: "claude", ID: "old"}, {Agent: "codex", ID: "new"}, {Agent: "claude", ID: "stale"}} {
+		if _, err := chain.Run(context.Background(), RunOpts{Session: session}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if first.calls != 1 || second.calls != 3 || chain.Name() != "codex" {
+		t.Fatalf("calls = %d/%d, active = %s", first.calls, second.calls, chain.Name())
+	}
+	if len(second.sessions) != 1 || second.sessions[0].ID != "new" {
+		t.Fatalf("sessions = %+v, want only new codex session", second.sessions)
+	}
+}
+
+func TestFallbackQuotaSwitchRestoresPositionWithAFreshSession(t *testing.T) {
+	first := &quotaTestAgent{name: "claude", resumable: true, providerOf: "claude"}
+	second := &quotaTestAgent{name: "codex", resumable: true, providerOf: "codex", run: func(RunOpts) (*Result, error) {
+		return &Result{Text: "ok"}, nil
+	}}
+	chain := NewFallback([]Agent{first, second}, WithQuotaSwitch("codex"))
+	for i := 0; i < 2; i++ {
+		if _, err := chain.Run(context.Background(), RunOpts{Session: &SessionRef{Agent: "codex", ID: "session"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if first.calls != 0 || second.calls != 2 || len(second.sessions) != 1 {
+		t.Fatalf("calls = %d/%d, resumed sessions = %d", first.calls, second.calls, len(second.sessions))
+	}
+}
+
+func TestFallbackNativeQuotaErrorsEmitQuotaSwitchAndDropTheNextProvidersSession(t *testing.T) {
+	for _, name := range []string{"claude", "codex", "pi"} {
+		t.Run(name, func(t *testing.T) {
+			first := &quotaTestAgent{name: name, run: func(RunOpts) (*Result, error) {
+				return nil, errors.New(name + " exited: quota exceeded")
+			}}
+			second := &quotaTestAgent{name: "other", resumable: true, providerOf: "other", run: func(RunOpts) (*Result, error) {
+				return &Result{Text: "ok"}, nil
+			}}
+			var switches, fallbacks int
+			_, err := NewFallback([]Agent{first, second}, WithQuotaSwitch("")).Run(context.Background(), RunOpts{
+				Session: &SessionRef{Agent: "other", ID: "old-other-session"},
+				OnLifecycle: func(event LifecycleEvent) {
+					if event.Phase == LifecyclePhaseQuotaSwitch {
+						switches++
+					}
+					if event.Phase == LifecyclePhaseFallback {
+						fallbacks++
+					}
+				},
+			})
+			if err != nil || switches != 1 || fallbacks != 0 || len(second.sessions) != 0 {
+				t.Fatalf("error=%v switches=%d fallbacks=%d sessions=%v", err, switches, fallbacks, second.sessions)
+			}
+		})
+	}
+}
+
+func TestFallbackQuotaSwitchAdvancesAgainOnALaterTurn(t *testing.T) {
+	first := &quotaTestAgent{name: "claude", run: func(RunOpts) (*Result, error) { return nil, quotaError("claude") }}
+	calls := 0
+	second := &quotaTestAgent{name: "codex", run: func(RunOpts) (*Result, error) {
+		calls++
+		if calls == 1 {
+			return &Result{Text: "ok"}, nil
+		}
+		return nil, quotaError("codex")
+	}}
+	third := &quotaTestAgent{name: "pi", run: func(RunOpts) (*Result, error) { return &Result{Text: "ok"}, nil }}
+	chain := NewFallback([]Agent{first, second, third}, WithQuotaSwitch(""))
+	var transitions []string
+	for i := 0; i < 3; i++ {
+		if _, err := chain.Run(context.Background(), RunOpts{OnLifecycle: func(event LifecycleEvent) {
+			if event.Phase == LifecyclePhaseQuotaSwitch {
+				transitions = append(transitions, event.Agent+":"+event.NextAgent)
+			}
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if first.calls != 1 || second.calls != 2 || third.calls != 2 || strings.Join(transitions, ",") != "claude:codex,codex:pi" {
+		t.Fatalf("calls=%d/%d/%d transitions=%v", first.calls, second.calls, third.calls, transitions)
+	}
+}

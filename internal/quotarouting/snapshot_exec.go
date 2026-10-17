@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // maxSnapshotBytes bounds the snapshot read. A quota-axi --json document is a
@@ -29,15 +31,11 @@ func ReadSnapshot(ctx context.Context, exe string, timeout time.Duration) (*Snap
 	readCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(readCtx, exe, "--json")
-	// Killing the direct child does not close the stdout pipe when the child
-	// was a script whose grandchild (e.g. a sleep it exec'd) inherits the
-	// descriptor; without WaitDelay, Run would block on that orphan until IT
-	// exits, defeating the timeout exactly when quota-axi is wedged.
-	cmd.WaitDelay = 250 * time.Millisecond
+	shellenv.ConfigureShellCommand(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &boundedBuffer{limit: maxSnapshotBytes, inner: &stdout}
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := shellenv.RunShellCommand(cmd); err != nil {
 		if readCtx.Err() != nil {
 			return nil, fmt.Errorf("quota-axi did not finish within %s", timeout)
 		}

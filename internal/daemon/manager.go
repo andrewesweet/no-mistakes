@@ -322,7 +322,9 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 		if !ok {
 			continue
 		}
-		next, _, err := newConfiguredAgent(ctx, cfg.ForReviewAgent(entry), evidenceRoot, lookPath, environment, nil)
+		roleConfig := cfg.ForReviewAgent(entry)
+		roleConfig.QuotaRouting.Enabled = false
+		next, _, err := newConfiguredAgent(ctx, roleConfig, evidenceRoot, lookPath, environment, nil)
 		if err != nil {
 			_ = primary.Close()
 			for _, existing := range roles {
@@ -367,6 +369,15 @@ func newConfiguredAgent(ctx context.Context, cfg *config.Config, evidenceRoot st
 		record = quotaRoutingRecordForRun(ctx, cfg, agents)
 		agents, switchActive = applyQuotaRoutingRecord(record, agents)
 	}
+	if switchActive {
+		found := false
+		for _, name := range agents {
+			found = found || string(name) == record.CurrentAgent()
+		}
+		if !found {
+			return nil, nil, fmt.Errorf("quota routing agent %q is no longer available", record.CurrentAgent())
+		}
+	}
 	created := make([]agent.Agent, 0, len(agents))
 	for _, name := range agents {
 		next, err := agent.NewWithOptions(name, cfg.AgentPathFor(name), cfg.AgentArgsFor(name), agent.Options{
@@ -385,7 +396,7 @@ func newConfiguredAgent(ctx context.Context, cfg *config.Config, evidenceRoot st
 	}
 	var fallbackOpts []agent.FallbackOption
 	if switchActive {
-		fallbackOpts = append(fallbackOpts, agent.WithQuotaSwitch())
+		fallbackOpts = append(fallbackOpts, agent.WithQuotaSwitch(record.CurrentAgent()))
 	}
 	ag := agent.NewFallback(created, fallbackOpts...)
 	// Fail closed ONLY under the trusted opt-out (see startRun): refuse an

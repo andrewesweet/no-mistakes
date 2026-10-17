@@ -287,7 +287,7 @@ OpenCode 2 receives both knobs in the model reference when the session is create
 OpenCode 1 receives them in the session message.
 Neither version receives model flags in the launch command, because `opencode serve` rejects them.
 
-An entry may also declare `quota_provider`: the quota-axi provider id [quota-aware routing](#quota_routing) reads this agent's evidence from. It is routing input, never a harness knob, and is read only when `quota_routing.enabled` is on. `claude` and `codex` never need it; `pi` does when it points at a codex subscription, unless its model already names the account (`codex-native/<model>` reads `codex-home`, `<account>/<model>` reads that account) - a `pi` with neither disables reordering for the run.
+An entry may also declare `quota_provider`: the quota-axi provider id [quota-aware routing](#quota_routing) reads this agent's evidence from. It is routing input, never a harness knob, and is read only when `quota_routing.enabled` is on. `claude` and `codex` never need it; `pi` always requires an explicit `quota_provider`. Its model prefix selects the account within that provider (`codex-native/<model>` reads `codex-home`, `<account>/<model>` reads that account). A `pi` without `quota_provider` disables reordering for the run.
 
 `rovodev` and `antigravity` have no mechanism no-mistakes can set - `acli rovodev serve` plus its REST session API take no model parameter, and the `agy` CLI parses flags strictly - so `agent_config` for them is a config error rather than a request that quietly does nothing. Reach for [`agent_args_override`](#agent_args_override) there if your build of the CLI accepts a flag. Reasoning effort is likewise unavailable for ACP targets: no-mistakes drives them through `acpx`, which exposes `--model` but no effort surface. acpx also accepts only the model ids a target advertises over ACP; for `devin` that is a subset of `devin models list`, and [`acp_registry_overrides`](#acp_registry_overrides) is the escape hatch for the rest.
 
@@ -863,7 +863,7 @@ When `enabled: true`, no-mistakes reads **one** snapshot from the locally instal
 - Surviving agents rank by quota-axi's own `spendPriority` (the minimum across the scopes that apply to the agent's configured model); ties keep your configured order.
 - An agent with no readable quota evidence - its provider is unmeasured, or no provider mapping exists for it - stays eligible but ranks below every measured one.
 
-Each agent keeps its own [`agent_config`](#agent_config) model and effort: only the order changes. A missing, slow, or unreadable `quota-axi` keeps your configured order, logs the reason, and never blocks a run; nothing is sent anywhere - the snapshot is read from your local `quota-axi` and the outcome is recorded on the local run only (`no-mistakes axi status` shows the candidates, the evidence, and the choice).
+Each agent keeps its own [`agent_config`](#agent_config) model and effort: only the order changes. A missing, slow, or unreadable `quota-axi` keeps your configured order, logs the reason, and never blocks a run; nothing is sent anywhere - the snapshot is read from your local `quota-axi` and the outcome is recorded on the local run only (`no-mistakes axi status`, `no-mistakes stats`, and `no-mistakes stats --run RUN_ID` show the candidates, the evidence, and the choice).
 
 Mid-run, a recognised quota error on the active agent moves the run **once** to the next agent in the chosen order, with a fresh session (any resumed session is dropped), and it never moves back. The existing agent-unavailable fallback is unchanged.
 
@@ -876,7 +876,7 @@ Subkeys:
 
 `quota_routing` is global-only: it decides which of this machine's credential-bearing agents a run spends, so a `quota_routing` block in a repository's `.no-mistakes.yaml` is a config error rather than an ignored key.
 
-Provider mapping: `claude` and `codex` map to their quota-axi providers automatically. Every other agent needs an explicit [`quota_provider`](#agent_config) under `agent_config`; an agent with neither keeps its configured position and produces one warning, and a `pi` agent with neither disables reordering for the whole run - the configured order stands, the mid-run switch stays off, and the run record says why. Model names are never used to infer a provider - except that a `pi` model in `account/model` form names its own quota-axi account (`codex-native/…` reads the `codex-home` account), which is exactly the one inference that is safe because the account is named, not guessed.
+Provider mapping: `claude` and `codex` map to their quota-axi providers automatically. Other agents can declare [`quota_provider`](#agent_config) under `agent_config`. An unmapped non-Pi agent ranks as unknown quota. A `pi` without an explicit provider disables reordering for the whole run with one warning: the configured order stands, the mid-run switch stays off, and the run record says why. Model names never infer a provider. After the provider is declared, a `pi` model in `account/model` form selects its quota-axi account (`codex-native/…` reads `codex-home`).
 
 ### worktree_roots
 

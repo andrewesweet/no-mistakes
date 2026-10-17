@@ -1,13 +1,19 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/quotarouting"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
@@ -141,6 +147,11 @@ func TestQuotaRoutingRecordForRun_FailingQuotaAXIKeepsConfiguredOrder(t *testing
 }
 
 func TestQuotaRoutingRecordForRun_PiWithoutQuotaProviderDisablesReordering(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
 	// The published intent: a Pi agent with no declared quota_provider and no
 	// built-in mapping disables reordering for the whole run with one
 	// warning, rather than guessing from the model name. The failure record
@@ -148,11 +159,14 @@ func TestQuotaRoutingRecordForRun_PiWithoutQuotaProviderDisablesReordering(t *te
 	cfg := quotaRoutingConfig(writeQuotaAXI(t, claudeThenCodexSnapshot))
 	cfg.Agents = []types.AgentName{types.AgentPi, types.AgentClaude, types.AgentCodex}
 	record := quotaRoutingRecordForRun(context.Background(), cfg, cfg.Agents)
-	if record == nil || !record.Enabled || record.Choice != "pi" {
+	if record == nil || record.Enabled || record.Choice != "pi" {
 		t.Fatalf("pi without quota_provider keeps the configured order, got %+v", record)
 	}
-	if record.Selected {
+	if record.Enabled {
 		t.Fatal("a pi-disabled run is not a live selection and must not arm the switch")
+	}
+	if strings.Count(logs.String(), "level=WARN") != 1 || !strings.Contains(logs.String(), "reordering disabled") {
+		t.Fatalf("expected one accurate warning, got %q", logs.String())
 	}
 	if !strings.Contains(record.Reason, "pi has no quota_provider") {
 		t.Fatalf("the record must say why reordering was disabled, got %q", record.Reason)
@@ -166,7 +180,7 @@ func TestQuotaRoutingRecordForRun_PiWithQuotaProviderStillRanks(t *testing.T) {
 	cfg.Agents = []types.AgentName{types.AgentPi, types.AgentClaude}
 	cfg.QuotaProviders = map[string]string{"pi": "codex"}
 	record := quotaRoutingRecordForRun(context.Background(), cfg, cfg.Agents)
-	if record == nil || !record.Selected {
+	if record == nil || !record.Enabled {
 		t.Fatalf("a mapped pi is a normal candidate, got %+v", record)
 	}
 }
@@ -189,7 +203,7 @@ func TestQuotaRoutingRecordForRun_UnmappedAgentKeepsItsPosition(t *testing.T) {
 
 func TestQuotaRoutingRecordForRun_TimeoutKeepsConfiguredOrder(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "quota-axi")
-	script := "#!/bin/sh\nsleep 5\n"
+	script := "#!/bin/sh\nexec sleep 5\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write slow quota-axi: %v", err)
 	}
@@ -225,8 +239,8 @@ func TestApplyQuotaRoutingRecord(t *testing.T) {
 
 	failure := quotarouting.NewFailureRecord(true, resolved, "quota-axi missing")
 	got, active := applyQuotaRoutingRecord(failure, resolved)
-	if active {
-		t.Fatal("a failed read must not activate the quota switch: there is no chosen order to advance through")
+	if !active {
+		t.Fatal("a failed read must preserve quota switching through configured order")
 	}
 	if got[0] != types.AgentClaude || got[1] != types.AgentCodex {
 		t.Fatalf("a failed read keeps the configured order, got %v", got)
@@ -334,5 +348,167 @@ func TestStoredQuotaRoutingRecord_FailsClosedOnGarbage(t *testing.T) {
 	record, err := storedQuotaRoutingRecord(`{"version":1,"enabled":true,"configured_agents":["claude"],"order":["claude"],"choice":"claude","reason":"ok","candidates":[],"switches":[]}`)
 	if err != nil || record == nil {
 		t.Fatalf("a valid stored record parses, got %v %+v", err, record)
+	}
+}
+
+func TestQuotaRoutingUnmappedCandidatesParticipateAsUnknowns(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		agents   []types.AgentName
+		snapshot string
+		want     []string
+	}{
+		{"unknown beats exhausted", []types.AgentName{types.AgentCodex, types.AgentOpenCode},
+			`{"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0}]}}]}`,
+			[]string{"opencode", "codex"}},
+		{"mapped unknown first", []types.AgentName{types.AgentClaude, types.AgentOpenCode}, `{"schemaVersion":5,"providers":[]}`, []string{"claude", "opencode"}},
+		{"unmapped unknown first", []types.AgentName{types.AgentOpenCode, types.AgentClaude}, `{"schemaVersion":5,"providers":[]}`, []string{"opencode", "claude"}},
+		{"only unmapped", []types.AgentName{types.AgentOpenCode, types.AgentCopilot}, `{"schemaVersion":5,"providers":[]}`, []string{"opencode", "copilot"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := quotaRoutingConfig(writeQuotaAXI(t, tc.snapshot))
+			cfg.Agents = tc.agents
+			record := quotaRoutingRecordForRun(context.Background(), cfg, cfg.Agents)
+			if record == nil || record.Choice != tc.want[0] || !reflect.DeepEqual(record.Order, tc.want) || len(record.Candidates) != len(tc.agents) {
+				t.Fatalf("record = %+v, want order %v and evidence for every candidate", record, tc.want)
+			}
+		})
+	}
+}
+
+func TestQuotaRoutingUsesTheEffectiveRawModelForScopesAndAccount(t *testing.T) {
+	for _, raw := range [][]string{{"--model", "opus"}, {"--model=opus"}} {
+		for _, profileModel := range []string{"sonnet", ""} {
+			cfg := quotaRoutingConfig(writeQuotaAXI(t, `{"schemaVersion":5,"providers":[
+    {"provider":"claude","quotaSemantics":{"status":"known","effectiveAvailability":[
+     {"scope":"all_models","status":"known","effectivePercentRemaining":90,"runway":{"status":"through_reset"},"selection":{"spendPriority":90}},
+     {"scope":"model:opus","status":"known","effectivePercentRemaining":0}]}},
+    {"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[
+     {"scope":"all_models","status":"known","effectivePercentRemaining":80,"runway":{"status":"through_reset"},"selection":{"spendPriority":80}}]}}
+   ]}`))
+			cfg.AgentConfig = map[string]agentcfg.Profile{"claude": {Model: profileModel}}
+			cfg.AgentArgsOverride = map[string][]string{"claude": raw}
+			record := quotaRoutingRecordForRun(context.Background(), cfg, cfg.Agents)
+			if record.Choice != "codex" || record.Candidates[0].Eligible || record.Candidates[0].Scope != "model:opus" {
+				t.Fatalf("profile=%q raw=%v record=%+v", profileModel, raw, record)
+			}
+		}
+	}
+	cfg := quotaRoutingConfig(writeQuotaAXI(t, `{"schemaVersion":6,"providers":[
+  {"provider":"codex","accountKey":"codex-home","quotaSemantics":{"status":"known","effectiveAvailability":[
+   {"scope":"all_models","status":"known","effectivePercentRemaining":90,"runway":{"status":"through_reset"},"selection":{"spendPriority":90}}]}},
+  {"provider":"codex","accountKey":"work","quotaSemantics":{"status":"known","effectiveAvailability":[
+   {"scope":"model:opus","status":"known","effectivePercentRemaining":0}]}}
+ ]}`))
+	cfg.Agents = []types.AgentName{types.AgentPi, types.AgentCodex}
+	cfg.AgentConfig = map[string]agentcfg.Profile{"pi": {Model: "codex-native/sonnet"}}
+	cfg.AgentArgsOverride = map[string][]string{"pi": {"--model", "work/opus"}}
+	cfg.QuotaProviders = map[string]string{"pi": "codex"}
+	record := quotaRoutingRecordForRun(context.Background(), cfg, cfg.Agents)
+	if record.Choice != "codex" || record.Candidates[0].Account != "work" || record.Candidates[0].Eligible || record.Candidates[0].Scope != "model:opus" {
+		t.Fatalf("raw model must bind work account and exhausted opus scope: %+v", record)
+	}
+}
+
+func TestPipelineQuotaSnapshotIsReadOnceAndNeverByReviewRoles(t *testing.T) {
+	cfg := quotaRoutingConfig(writeQuotaAXI(t, claudeThenCodexSnapshot))
+	counter := filepath.Join(t.TempDir(), "reads")
+	t.Setenv("NM_QUOTA_READS", counter)
+	script, err := os.ReadFile(cfg.QuotaRouting.QuotaAXIPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script = bytes.Replace(script, []byte("#!/bin/sh\n"), []byte("#!/bin/sh\nprintf x >> \"$NM_QUOTA_READS\"\n"), 1)
+	if err := os.WriteFile(cfg.QuotaRouting.QuotaAXIPath, script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg.ReviewAgents = map[string]config.ReviewAgent{}
+	for _, role := range config.ReviewAgentRoles {
+		cfg.ReviewAgents[role] = config.ReviewAgent{Agent: types.AgentCodex}
+	}
+	primary, record, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), fakeLookPath, runenv.Overlay{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer primary.Close()
+	recovered, _, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), fakeLookPath, runenv.Overlay{}, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	reads, err := os.ReadFile(counter)
+	if err != nil || string(reads) != "x" {
+		t.Fatalf("snapshot reads = %q, error = %v; want exactly one", reads, err)
+	}
+}
+
+func TestQuotaRoutingRecoveryRestoresTheLastSwitch(t *testing.T) {
+	cfg := quotaRoutingConfig(writeQuotaAXIFail(t))
+	record := quotarouting.NewFailureRecord(true, cfg.Agents, "quota-axi missing")
+	record = record.AppendSwitch(types.AgentClaude, types.AgentCodex, "quota exceeded", time.Now())
+	payload, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := storedQuotaRoutingRecord(string(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag, _, err := newConfiguredAgent(context.Background(), cfg, t.TempDir(), fakeLookPath, runenv.Overlay{}, restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ag.Close()
+	if ag.Name() != "codex" {
+		t.Fatalf("active agent = %s, want codex", ag.Name())
+	}
+}
+
+func TestMissingQuotaSnapshotStillSwitchesOnANativeQuotaError(t *testing.T) {
+	dir := t.TempDir()
+	claude := filepath.Join(dir, "claude")
+	pi := filepath.Join(dir, "pi")
+	if err := os.WriteFile(claude, []byte("#!/bin/sh\necho 'quota exceeded' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pi, []byte(`#!/bin/sh
+cat >/dev/null
+printf '%s' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}]}]}'
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := quotaRoutingConfig(filepath.Join(dir, "missing-quota-axi"))
+	cfg.Agents = []types.AgentName{types.AgentClaude, types.AgentPi}
+	cfg.QuotaProviders = map[string]string{"pi": "codex"}
+	cfg.AgentPathOverride = map[string]string{"claude": claude, "pi": pi}
+	ag, record, err := newConfiguredAgent(context.Background(), cfg, t.TempDir(), fakeLookPath, runenv.Overlay{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ag.Close()
+	switches := 0
+	for i := 0; i < 2; i++ {
+		result, err := ag.Run(context.Background(), agent.RunOpts{CWD: dir, Prompt: "hello", OnLifecycle: func(event agent.LifecycleEvent) {
+			if event.Phase == agent.LifecyclePhaseQuotaSwitch {
+				switches++
+			}
+		}})
+		if err != nil || result == nil || result.Text != "ok" || result.Provider != "pi" {
+			t.Fatalf("result = %+v, error = %v", result, err)
+		}
+	}
+	if switches != 1 || record.Choice != "claude" || record.Reason == "" {
+		t.Fatalf("switches = %d, initial record = %+v", switches, record)
+	}
+}
+
+func TestQuotaRoutingRecoveryRefusesAnUnavailableActiveAgent(t *testing.T) {
+	cfg := quotaRoutingConfig(writeQuotaAXIFail(t))
+	cfg.Agents = []types.AgentName{types.AgentClaude}
+	record := quotarouting.NewFailureRecord(true, []types.AgentName{types.AgentClaude, types.AgentCodex}, "quota-axi missing")
+	record = record.AppendSwitch(types.AgentClaude, types.AgentCodex, "quota exceeded", time.Now())
+	ag, _, err := newConfiguredAgent(context.Background(), cfg, t.TempDir(), fakeLookPath, runenv.Overlay{}, record)
+	if ag != nil || err == nil || !strings.Contains(err.Error(), "no longer available") {
+		t.Fatalf("recovery must not return to exhausted claude: agent=%v error=%v", ag, err)
 	}
 }

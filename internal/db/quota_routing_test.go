@@ -2,6 +2,7 @@ package db
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -78,5 +79,38 @@ func TestRunQuotaRoutingMutableRecord(t *testing.T) {
 	got, err = d.GetRun(run.ID)
 	if err != nil || got.QuotaRouting != payload {
 		t.Fatalf("the run row scan carries the amended record: %+v %v", got.QuotaRouting, err)
+	}
+}
+
+func TestStatsIncludeEachRunsPersistedQuotaEvidence(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"version":1,"enabled":true,"configured":["claude","codex"],"order":["codex","claude"],"choice":"codex","reason":"ranked by quota evidence","candidates":[{"agent":"codex","provider":"codex","account":"codex-home","scope":"all_models","remaining":80,"spend_priority":90,"eligible":true,"rankable":true,"reason":"headroom"}],"switches":[{"from":"codex","to":"claude","reason":"quota exceeded","at":123}]}`
+	if err := d.SetRunQuotaRouting(run.ID, payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertRun(repo.ID, "no-quota", "head", "base"); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := d.GetStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats.QuotaRouting) != 1 || stats.QuotaRouting[0].RunID != run.ID {
+		t.Fatalf("quota stats = %+v, want only run %s", stats.QuotaRouting, run.ID)
+	}
+	var want quotarouting.Record
+	if err := json.Unmarshal([]byte(payload), &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(stats.QuotaRouting[0].Record, &want) {
+		t.Fatalf("quota record = %+v, want %+v", stats.QuotaRouting[0].Record, &want)
 	}
 }

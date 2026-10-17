@@ -582,6 +582,7 @@ func quotaRoutingField(record *quotarouting.Record) toon.Field {
 		row := quotaCandidateRow{
 			Agent:    string(c.Agent),
 			Provider: c.Provider,
+			Account:  c.Account,
 			Scope:    c.Scope,
 			Runway:   c.Runway,
 			Status:   quotaCandidateStatus(c),
@@ -622,6 +623,7 @@ func quotaCandidateStatus(c quotarouting.Evidence) string {
 type quotaCandidateRow struct {
 	Agent         string `toon:"agent"`
 	Provider      string `toon:"provider"`
+	Account       string `toon:"account"`
 	Scope         string `toon:"scope"`
 	Remaining     string `toon:"remaining"`
 	SpendPriority string `toon:"spend_priority"`
