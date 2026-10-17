@@ -36,8 +36,12 @@ type Snapshot struct {
 
 // Provider is one quota row from the snapshot.
 type Provider struct {
-	Provider       string         `json:"provider"`
-	AccountKey     string         `json:"accountKey"`
+	Provider       string   `json:"provider"`
+	AccountKey     string   `json:"accountKey"`
+	AccountKeys    []string `json:"accountKeys,omitempty"`
+	AccountLocator *struct {
+		DelegateEligible bool `json:"delegateEligible"`
+	} `json:"accountLocator,omitempty"`
 	QuotaSemantics QuotaSemantics `json:"quotaSemantics"`
 }
 
@@ -91,11 +95,18 @@ func ParseSnapshot(data []byte) (*Snapshot, error) {
 			if strings.TrimSpace(provider.AccountKey) == "" {
 				return nil, fmt.Errorf("provider %s has no accountKey in a schema-6 snapshot", provider.Provider)
 			}
-			key := provider.Provider + "\x00" + provider.AccountKey
-			if seen[key] {
-				return nil, fmt.Errorf("provider %s repeats accountKey %s", provider.Provider, provider.AccountKey)
+			rowKeys := map[string]bool{}
+			for _, account := range append([]string{provider.AccountKey}, provider.AccountKeys...) {
+				if rowKeys[account] {
+					continue
+				}
+				rowKeys[account] = true
+				key := provider.Provider + "\x00" + account
+				if seen[key] {
+					return nil, fmt.Errorf("provider %s repeats accountKey %s", provider.Provider, account)
+				}
+				seen[key] = true
 			}
-			seen[key] = true
 		}
 	}
 	return &snapshot, nil

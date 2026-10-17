@@ -30,7 +30,7 @@ func ReadSnapshot(ctx context.Context, exe string, timeout time.Duration) (*Snap
 	}
 	readCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(readCtx, exe, "--json")
+	cmd := exec.CommandContext(readCtx, exe, "--full", "--json")
 	shellenv.ConfigureShellCommand(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &boundedBuffer{limit: maxSnapshotBytes, inner: &stdout}

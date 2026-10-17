@@ -1,6 +1,7 @@
 package quotarouting
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -277,11 +278,19 @@ func evaluate(snapshot *Snapshot, candidate Candidate, expectedRunLength time.Du
 		}
 	}
 
+	for _, r := range rows {
+		if r.Selection == nil || r.Selection.SpendPriority == nil {
+			evidence.Scope = r.Scope
+			evidence.Reason = "spendPriority missing at " + r.Scope + ": not rankable"
+			return evidence
+		}
+	}
+
 	// Gate 3 then rank: spendPriority is the minimum across the applicable
 	// scopes, and a candidate with no comparable scalar stays unranked.
 	limiting := rows[0]
 	for _, r := range rows[1:] {
-		if spendPriorityOf(r) < spendPriorityOf(limiting) {
+		if *r.Selection.SpendPriority < *limiting.Selection.SpendPriority {
 			limiting = r
 		}
 	}
@@ -290,10 +299,6 @@ func evaluate(snapshot *Snapshot, candidate Candidate, expectedRunLength time.Du
 	if limiting.Runway != nil {
 		evidence.Runway = limiting.Runway.Status
 	}
-	if limiting.Selection == nil || limiting.Selection.SpendPriority == nil {
-		evidence.Reason = "spendPriority missing at " + limiting.Scope + ": not rankable"
-		return evidence
-	}
 	spendPriority := *limiting.Selection.SpendPriority
 	evidence.SpendPriority = &spendPriority
 	evidence.Rankable = true
@@ -301,16 +306,9 @@ func evaluate(snapshot *Snapshot, candidate Candidate, expectedRunLength time.Du
 	return evidence
 }
 
-func spendPriorityOf(row EffectiveAvailability) float64 {
-	if row.Selection == nil || row.Selection.SpendPriority == nil {
-		return 0
-	}
-	return *row.Selection.SpendPriority
-}
-
 // bindRow finds the one provider row a candidate binds to: the lane's account
-// row on schema 6 (falling back to the default account), the provider's row
-// on schema 5. It reports false when the provider has no row at all.
+// row on schema 6 (the default account when no lane is named), the provider's row
+// on schema 5. It reports false when no account matches.
 func bindRow(snapshot *Snapshot, candidate Candidate) (*Provider, bool) {
 	var fallback *Provider
 	for i := range snapshot.Providers {
@@ -322,10 +320,13 @@ func bindRow(snapshot *Snapshot, candidate Candidate) (*Provider, bool) {
 			return row, true
 		}
 		lane := Lane(candidate.Agent, candidate.Model)
-		if lane != "" && row.AccountKey == lane {
+		if lane != "" && (row.AccountKey == lane || slices.Contains(row.AccountKeys, lane)) {
 			return row, true
 		}
-		if row.AccountKey == "default" && fallback == nil {
+		if candidate.Agent == types.AgentClaude && candidate.Provider == "claude" && row.AccountLocator != nil && row.AccountLocator.DelegateEligible {
+			return row, true
+		}
+		if lane == "" && (row.AccountKey == "default" || slices.Contains(row.AccountKeys, "default")) && fallback == nil {
 			fallback = row
 		}
 	}
@@ -345,12 +346,19 @@ func applicableRows(row *Provider, model string) []EffectiveAvailability {
 	}
 	var rows []EffectiveAvailability
 	for _, r := range row.QuotaSemantics.EffectiveAvailability {
+		scope := r.Scope
+		if row.Provider == "claude" && scope == "seven_day_opus" {
+			scope = "model:opus"
+		}
+		modelScope, scopedModel := strings.CutPrefix(scope, "model:")
 		switch {
-		case r.Scope == "all_models" || r.Scope == "all_products":
+		case scope == "all_models" || scope == "all_products":
 			rows = append(rows, r)
-		case model != "" && r.Scope == "model:"+bare:
+		case model != "" && scope == "model:"+bare:
 			rows = append(rows, r)
-		case model != "" && r.Scope == "product:"+bare:
+		case row.Provider == "claude" && scopedModel && modelScope != "" && strings.HasPrefix(bare, "claude-"+modelScope+"-"):
+			rows = append(rows, r)
+		case model != "" && scope == "product:"+bare:
 			rows = append(rows, r)
 		}
 	}

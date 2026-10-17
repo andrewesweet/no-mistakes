@@ -512,3 +512,45 @@ func TestQuotaRoutingRecoveryRefusesAnUnavailableActiveAgent(t *testing.T) {
 		t.Fatalf("recovery must not return to exhausted claude: agent=%v error=%v", ag, err)
 	}
 }
+
+func TestQuotaRoutingRecoveryWithoutARecordNeverReadsANewSnapshot(t *testing.T) {
+	manager, run, _ := gatePinFixture(t, "", nil)
+	marker := filepath.Join(t.TempDir(), "snapshot-read")
+	t.Setenv("NM_QUOTA_RECOVERY_MARKER", marker)
+	executable := writeQuotaAXI(t, claudeThenCodexSnapshot)
+	script, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script = bytes.Replace(script, []byte("#!/bin/sh\n"), []byte("#!/bin/sh\nprintf called > \"$NM_QUOTA_RECOVERY_MARKER\"\n"), 1)
+	if err := os.WriteFile(executable, script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	global, err := os.ReadFile(manager.paths.ConfigFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	global = append(global, []byte("quota_routing:\n  enabled: true\n  quota_axi_path: "+executable+"\n")...)
+	if err := os.WriteFile(manager.paths.ConfigFile(), global, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		plan, err := manager.prepareRecoveredRun(context.Background(), run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan.cfg.QuotaRouting.Enabled || plan.agent.Name() != "claude" {
+			t.Fatalf("old run changed its routing: enabled=%v agent=%s", plan.cfg.QuotaRouting.Enabled, plan.agent.Name())
+		}
+		if err := plan.agent.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("recovery executed quota-axi: %v", err)
+	}
+	stored, err := manager.db.GetRun(run.ID)
+	if err != nil || stored.QuotaRouting != "" {
+		t.Fatalf("original absent record changed: %+v error=%v", stored, err)
+	}
+}

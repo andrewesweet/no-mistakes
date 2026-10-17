@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -234,8 +235,8 @@ func TestFallbackQuotaSwitchPersistsAcrossTurns(t *testing.T) {
 	if first.calls != 1 || second.calls != 3 || chain.Name() != "codex" {
 		t.Fatalf("calls = %d/%d, active = %s", first.calls, second.calls, chain.Name())
 	}
-	if len(second.sessions) != 1 || second.sessions[0].ID != "new" {
-		t.Fatalf("sessions = %+v, want only new codex session", second.sessions)
+	if len(second.sessions) != 3 || second.sessions[0].ID != "" || second.sessions[1].ID != "new" || second.sessions[2].ID != "" {
+		t.Fatalf("sessions = %+v, want fresh/resumed/fresh codex sessions", second.sessions)
 	}
 }
 
@@ -250,7 +251,7 @@ func TestFallbackQuotaSwitchRestoresPositionWithAFreshSession(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if first.calls != 0 || second.calls != 2 || len(second.sessions) != 1 {
+	if first.calls != 0 || second.calls != 2 || len(second.sessions) != 2 || second.sessions[0].ID != "" || second.sessions[1].ID != "session" {
 		t.Fatalf("calls = %d/%d, resumed sessions = %d", first.calls, second.calls, len(second.sessions))
 	}
 }
@@ -276,7 +277,7 @@ func TestFallbackNativeQuotaErrorsEmitQuotaSwitchAndDropTheNextProvidersSession(
 					}
 				},
 			})
-			if err != nil || switches != 1 || fallbacks != 0 || len(second.sessions) != 0 {
+			if err != nil || switches != 1 || fallbacks != 0 || len(second.sessions) != 1 || second.sessions[0].ID != "" || second.sessions[0].Agent != "" {
 				t.Fatalf("error=%v switches=%d fallbacks=%d sessions=%v", err, switches, fallbacks, second.sessions)
 			}
 		})
@@ -307,5 +308,64 @@ func TestFallbackQuotaSwitchAdvancesAgainOnALaterTurn(t *testing.T) {
 	}
 	if first.calls != 1 || second.calls != 2 || third.calls != 2 || strings.Join(transitions, ",") != "claude:codex,codex:pi" {
 		t.Fatalf("calls=%d/%d/%d transitions=%v", first.calls, second.calls, third.calls, transitions)
+	}
+}
+
+func TestFallbackQuotaSwitchDoesNotConsumeStructuredRejection(t *testing.T) {
+	schema := []byte(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}`)
+	for _, wrapped := range []bool{false, true} {
+		t.Run(fmt.Sprint(wrapped), func(t *testing.T) {
+			_, rejection := finalizeTextResult("pi", `{"ok":"claude exited: quota exceeded"}`, schema, TokenUsage{})
+			if !IsStructuredOutputRejected(rejection) {
+				t.Fatalf("expected schema rejection, got %v", rejection)
+			}
+			if wrapped {
+				rejection = fmt.Errorf("validation: %w", rejection)
+			}
+			if IsQuotaExhaustionError(rejection) {
+				t.Fatalf("schema rejection is not a quota error: %v", rejection)
+			}
+			first := &quotaTestAgent{name: "pi", run: func(RunOpts) (*Result, error) { return nil, rejection }}
+			second := &quotaTestAgent{name: "codex", run: func(RunOpts) (*Result, error) { return &Result{Text: "unexpected"}, nil }}
+			chain := NewFallback([]Agent{first, second}, WithQuotaSwitch(""))
+			switches := 0
+			for i := 0; i < 2; i++ {
+				_, err := chain.Run(context.Background(), RunOpts{OnLifecycle: func(event LifecycleEvent) {
+					if event.Phase == LifecyclePhaseQuotaSwitch {
+						switches++
+					}
+				}})
+				if !errors.Is(err, rejection) {
+					t.Fatalf("error=%v, want schema rejection", err)
+				}
+			}
+			if first.calls != 2 || second.calls != 0 || switches != 0 || chain.Name() != "pi" {
+				t.Fatalf("calls=%d/%d switches=%d head=%s", first.calls, second.calls, switches, chain.Name())
+			}
+		})
+	}
+}
+
+func TestRestoredQuotaSwitchStartsADurableSessionWithOneRemainingAgent(t *testing.T) {
+	remaining := &quotaTestAgent{name: "pi", resumable: true, providerOf: "pi", run: func(opts RunOpts) (*Result, error) { return &Result{Text: "ok"}, nil }}
+	chain := NewFallback([]Agent{remaining}, WithQuotaSwitch("pi"))
+	for i := 0; i < 2; i++ {
+		if _, err := chain.Run(context.Background(), RunOpts{Session: &SessionRef{Agent: "pi", ID: "previous-session"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(remaining.sessions) != 2 || remaining.sessions[0].ID != "" || remaining.sessions[1].ID != "previous-session" {
+		t.Fatalf("restored singleton must start durably before resuming: %+v", remaining.sessions)
+	}
+}
+
+func TestQuotaSwitchDoesNotCreateUnrequestedSessions(t *testing.T) {
+	first := &quotaTestAgent{name: "claude", run: func(RunOpts) (*Result, error) { return nil, quotaError("claude") }}
+	second := &quotaTestAgent{name: "pi", resumable: true, providerOf: "pi", run: func(RunOpts) (*Result, error) { return &Result{Text: "ok"}, nil }}
+	if _, err := NewFallback([]Agent{first, second}, WithQuotaSwitch("")).Run(context.Background(), RunOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(second.sessions) != 0 {
+		t.Fatalf("cold invocation acquired a durable session request: %+v", second.sessions)
 	}
 }

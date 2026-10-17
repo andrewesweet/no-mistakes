@@ -191,6 +191,9 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err != nil {
 		return nil, err
 	}
+	if quotaRecord == nil {
+		cfg.QuotaRouting.Enabled = false
+	}
 	ag, _, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx), quotaRecord)
 	if err != nil {
 		return nil, err
@@ -396,7 +399,11 @@ func newConfiguredAgent(ctx context.Context, cfg *config.Config, evidenceRoot st
 	}
 	var fallbackOpts []agent.FallbackOption
 	if switchActive {
-		fallbackOpts = append(fallbackOpts, agent.WithQuotaSwitch(record.CurrentAgent()))
+		start := ""
+		if len(record.Switches) > 0 {
+			start = record.CurrentAgent()
+		}
+		fallbackOpts = append(fallbackOpts, agent.WithQuotaSwitch(start))
 	}
 	ag := agent.NewFallback(created, fallbackOpts...)
 	// Fail closed ONLY under the trusted opt-out (see startRun): refuse an

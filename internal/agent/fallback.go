@@ -29,7 +29,7 @@ func WithQuotaSwitch(start string) FallbackOption {
 		for i, current := range f.agents {
 			if current.Name() == start {
 				f.position.Store(int64(i))
-				f.freshSession.Store(i > 0)
+				f.freshSession.Store(true)
 				break
 			}
 		}
@@ -40,20 +40,19 @@ func WithQuotaSwitch(start string) FallbackOption {
 // invocation fails because the current agent process is unavailable, or -
 // with WithQuotaSwitch - when the active agent's subscription quota ran out.
 func NewFallback(agents []Agent, opts ...FallbackOption) Agent {
-	switch len(agents) {
-	case 0:
+	if len(agents) == 0 {
 		return nil
-	case 1:
-		return agents[0]
-	default:
-		copied := make([]Agent, len(agents))
-		copy(copied, agents)
-		f := &fallbackAgent{agents: copied}
-		for _, opt := range opts {
-			opt(f)
-		}
-		return f
 	}
+	if len(agents) == 1 && len(opts) == 0 {
+		return agents[0]
+	}
+	copied := make([]Agent, len(agents))
+	copy(copied, agents)
+	f := &fallbackAgent{agents: copied}
+	for _, opt := range opts {
+		opt(f)
+	}
+	return f
 }
 
 func (a *fallbackAgent) Name() string {
@@ -117,7 +116,7 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 		// Without the quota switch the session provider is the only
 		// candidate, exactly as before. With it the remaining chosen order
 		// stays eligible: only the session provider resumes the session,
-		// and once a switch fires the session is dropped entirely.
+		// and once a switch fires the session identity is dropped.
 		if !a.quotaSwitch {
 			candidates = []Agent{sessionAgent}
 		}
@@ -135,7 +134,11 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 				if sessionDropped || current != sessionAgent {
 					// A different provider, or any agent after a
 					// quota switch, continues with a fresh session.
-					currentOpts.Session = nil
+					if SupportsSessionResume(current) {
+						currentOpts.Session = &SessionRef{}
+					} else {
+						currentOpts.Session = nil
+					}
 					currentOpts.SessionFallback = false
 				}
 			} else if !SupportsSessionResume(current) {
@@ -203,7 +206,7 @@ func (a *fallbackAgent) Close() error {
 }
 
 func isAgentUnavailableError(err error) bool {
-	if err == nil {
+	if err == nil || IsStructuredOutputRejected(err) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())

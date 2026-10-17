@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestReadSnapshotReapsDescendantsOnEveryExit(t *testing.T) {
@@ -62,5 +64,25 @@ func TestReadSnapshotReapsDescendantsOnEveryExit(t *testing.T) {
 				time.Sleep(10 * time.Millisecond)
 			}
 		})
+	}
+}
+
+func TestReadSnapshotRequestsClaudeProfileSelectorMetadata(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "quota-axi")
+	script := `#!/bin/sh
+if [ "$*" != '--full --json' ]; then exit 3; fi
+printf '%s' '{"schemaVersion":6,"providers":[{"provider":"claude","accountKey":"profile:selected","accountKeys":["profile:selected"],"accountLocator":{"kind":"config-dir","path":"/selected-profile","delegateEligible":true},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0}]}}]}'
+`
+	if err := os.WriteFile(executable, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := ReadSnapshot(context.Background(), executable, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection := Select(snapshot, []Candidate{{Agent: types.AgentClaude}}, 90*time.Minute)
+	evidence := selection.EvidenceFor(types.AgentClaude)
+	if evidence.Eligible || evidence.Account != "profile:selected" || evidence.Remaining == nil || *evidence.Remaining != 0 {
+		t.Fatalf("selected Claude profile exhaustion was discarded: %+v", evidence)
 	}
 }
