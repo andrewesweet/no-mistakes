@@ -1322,19 +1322,13 @@ type QuotaRouting struct {
 // QuotaProviderFor returns the agent's declared quota-axi provider id from
 // its agent_config entry, "" when none.
 func (c *GlobalConfig) QuotaProviderFor(agent types.AgentName) string {
-	if c.QuotaProviders == nil {
-		return ""
-	}
-	return c.QuotaProviders[string(agent)]
+	return agentSettingFor(c.QuotaProviders, agent)
 }
 
 // QuotaProviderFor is the effective-config accessor for the same map (see
 // GlobalConfig.QuotaProviderFor).
 func (c *Config) QuotaProviderFor(agent types.AgentName) string {
-	if c.QuotaProviders == nil {
-		return ""
-	}
-	return c.QuotaProviders[string(agent)]
+	return agentSettingFor(c.QuotaProviders, agent)
 }
 
 // retiredJev names exactly the two retired jev subkeys so a global config
@@ -1985,7 +1979,7 @@ func (c *Config) resolveAutoAgent(ctx context.Context, lookPath func(string) (st
 
 func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentName, lookPath func(string) (string, error)) ([]types.AgentName, error) {
 	resolved := make([]types.AgentName, 0, len(candidates))
-	seen := map[string]bool{}
+	seen := map[types.AgentName]bool{}
 	probed := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
 		name, ok, probe, err := c.resolveConfiguredAgent(ctx, candidate, lookPath)
@@ -1998,7 +1992,7 @@ func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentN
 		if !ok {
 			continue
 		}
-		identity := resolvedAgentIdentity(name)
+		identity := types.CanonicalAgentName(name)
 		if seen[identity] {
 			continue
 		}
@@ -2009,13 +2003,6 @@ func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentN
 		return nil, noRunnableAgentError(candidates, probed)
 	}
 	return resolved, nil
-}
-
-func resolvedAgentIdentity(name types.AgentName) string {
-	if target, ok := types.ACPTargetFor(name); ok {
-		return "acp:" + target
-	}
-	return "native:" + string(name)
 }
 
 func noRunnableAgentError(configured []types.AgentName, probed []string) error {
@@ -2199,18 +2186,23 @@ func (c *Config) AgentProfile() agentcfg.Profile {
 }
 
 func (c *Config) AgentProfileFor(name types.AgentName) agentcfg.Profile {
-	if profile, ok := c.AgentConfig[string(name)]; ok {
-		return profile
+	return agentSettingFor(c.AgentConfig, name)
+}
+
+func agentSettingFor[T any](settings map[string]T, name types.AgentName) T {
+	if value, ok := settings[string(name)]; ok {
+		return value
 	}
 	if alias, ok := types.ACPAliasFor(name); ok {
-		return c.AgentConfig["acp:"+alias.Target]
+		return settings["acp:"+alias.Target]
 	}
 	if target, ok := types.ACPTargetFor(name); ok {
 		if alias, ok := types.ACPAliasForTarget(target); ok {
-			return c.AgentConfig[string(alias.Name)]
+			return settings[string(alias.Name)]
 		}
 	}
-	return agentcfg.Profile{}
+	var zero T
+	return zero
 }
 
 // agentProfileRaw is the on-disk YAML shape of one agent_config entry. Effort

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -20,10 +21,18 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func requireQuotaShell(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("requires POSIX shell fixtures")
+	}
+}
+
 // writeQuotaAXI installs a fake quota-axi executable that emits the given
 // stdout. It returns the path to put in quota_routing.quota_axi_path.
 func writeQuotaAXI(t *testing.T, stdout string) string {
 	t.Helper()
+	requireQuotaShell(t)
 	path := filepath.Join(t.TempDir(), "quota-axi")
 	script := "#!/bin/sh\ncat <<'NMEOF'\n" + stdout + "\nNMEOF\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
@@ -36,6 +45,7 @@ func writeQuotaAXI(t *testing.T, stdout string) string {
 // given stderr, the stand-in for a missing or logged-out CLI.
 func writeQuotaAXIFail(t *testing.T) string {
 	t.Helper()
+	requireQuotaShell(t)
 	path := filepath.Join(t.TempDir(), "quota-axi")
 	script := "#!/bin/sh\necho 'boom' >&2\nexit 3\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
@@ -202,6 +212,7 @@ func TestQuotaRoutingRecordForRun_UnmappedAgentKeepsItsPosition(t *testing.T) {
 }
 
 func TestQuotaRoutingRecordForRun_TimeoutKeepsConfiguredOrder(t *testing.T) {
+	requireQuotaShell(t)
 	path := filepath.Join(t.TempDir(), "quota-axi")
 	script := "#!/bin/sh\nexec sleep 5\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
@@ -465,6 +476,7 @@ func TestQuotaRoutingRecoveryRestoresTheLastSwitch(t *testing.T) {
 }
 
 func TestMissingQuotaSnapshotStillSwitchesOnANativeQuotaError(t *testing.T) {
+	requireQuotaShell(t)
 	dir := t.TempDir()
 	claude := filepath.Join(dir, "claude")
 	pi := filepath.Join(dir, "pi")
@@ -552,5 +564,77 @@ func TestQuotaRoutingRecoveryWithoutARecordNeverReadsANewSnapshot(t *testing.T) 
 	stored, err := manager.db.GetRun(run.ID)
 	if err != nil || stored.QuotaRouting != "" {
 		t.Fatalf("original absent record changed: %+v error=%v", stored, err)
+	}
+}
+
+func TestQuotaRoutingRecoversCanonicalACPIdentities(t *testing.T) {
+	for _, tc := range []struct{ stored, resolved, event, adapter string }{
+		{"cursor", "cursor", "acp:cursor", "acp:cursor"},
+		{"cursor", "acp:cursor", "cursor", "acp:cursor"},
+		{"acp:cursor", "cursor", "cursor", "acp:cursor"},
+		{"devin", "devin", "acp:devin", "acp:devin"},
+		{"devin", "acp:devin", "devin", "acp:devin"},
+		{"acp:devin", "devin", "devin", "acp:devin"},
+	} {
+		for _, switched := range []bool{false, true} {
+			cfg := quotaRoutingConfig(filepath.Join(t.TempDir(), "unavailable-quota-axi"))
+			cfg.Agents = []types.AgentName{types.AgentClaude, types.AgentName(tc.resolved)}
+			order := []types.AgentName{types.AgentName(tc.stored), types.AgentClaude}
+			if switched {
+				order[0], order[1] = order[1], order[0]
+			}
+			record := quotarouting.NewRecord(true, []types.AgentName{types.AgentClaude, types.AgentName(tc.stored)}, order, quotarouting.Selection{Choice: order[0]})
+			if switched {
+				record = record.AppendSwitch(types.AgentClaude, types.AgentName(tc.event), "quota exceeded", time.Now())
+			}
+			payload, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restored, err := storedQuotaRoutingRecord(string(payload))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ag, _, err := newConfiguredAgent(context.Background(), cfg, t.TempDir(), fakeLookPath, runenv.Overlay{}, restored)
+			if err != nil {
+				t.Fatalf("stored=%s resolved=%s event=%s switched=%v: %v", tc.stored, tc.resolved, tc.event, switched, err)
+			}
+			if ag.Name() != tc.adapter {
+				t.Errorf("recovered=%s want=%s", ag.Name(), tc.adapter)
+			}
+			if err := ag.Close(); err != nil {
+				t.Fatal(err)
+			}
+			ordered := restored.OrderedAgents(cfg.Agents)
+			index := 0
+			if switched {
+				index = 1
+			}
+			if ordered[index] != types.AgentName(tc.resolved) {
+				t.Fatalf("configured spelling changed: %v", ordered)
+			}
+		}
+	}
+}
+
+func TestQuotaRoutingUsesProvidersFromTheOtherACPSpelling(t *testing.T) {
+	for _, tc := range []struct{ selected, configured string }{
+		{"cursor", "acp:cursor"}, {"acp:cursor", "cursor"},
+		{"devin", "acp:devin"}, {"acp:devin", "devin"},
+	} {
+		snapshot := writeQuotaAXI(t, `{"schemaVersion":5,"providers":[
+   {"provider":"cursor","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0}]}},
+   {"provider":"claude","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":80,"runway":{"status":"through_reset"},"selection":{"spendPriority":2}}]}}
+  ]}`)
+		global, err := config.LoadGlobalFromBytes([]byte("agent: [" + tc.selected + ", claude]\nquota_routing:\n  enabled: true\nagent_config:\n  " + tc.configured + ": {quota_provider: cursor}\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := config.Merge(global, &config.RepoConfig{})
+		cfg.QuotaRouting.QuotaAXIPath = snapshot
+		record := quotaRoutingRecordForRun(context.Background(), cfg, cfg.Agents)
+		if record == nil || record.Choice != "claude" || len(record.Candidates) != 2 || record.Candidates[0].Eligible || record.Candidates[0].Agent != types.AgentName(tc.selected) || record.Candidates[0].Provider != "cursor" {
+			t.Fatalf("selected=%s configured=%s record=%+v", tc.selected, tc.configured, record)
+		}
 	}
 }

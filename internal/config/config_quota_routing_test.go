@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // TestQuotaRoutingOffByDefault pins the opt-in default: without the block the
@@ -126,5 +128,36 @@ func TestQuotaProviderSurvivesOnAnOtherwiseEmptyProfile(t *testing.T) {
 	}
 	if cfg.AgentConfig["grok"].Model != "" {
 		t.Fatalf("grok model = %q, want empty", cfg.AgentConfig["grok"].Model)
+	}
+}
+
+func TestQuotaProviderUsesExactFirstBidirectionalACPAliases(t *testing.T) {
+	for _, tc := range []struct{ selected, configured string }{
+		{"cursor", "acp:cursor"}, {"acp:cursor", "cursor"},
+		{"devin", "acp:devin"}, {"acp:devin", "devin"},
+	} {
+		for _, exact := range []bool{false, true} {
+			data := "agent: " + tc.selected + "\nagent_config:\n  " + tc.configured + ": {quota_provider: shared-provider}\n"
+			want := "shared-provider"
+			if exact {
+				data += "  " + tc.selected + ": {quota_provider: exact-provider}\n"
+				want = "exact-provider"
+			}
+			global, err := LoadGlobalFromBytes([]byte(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			effective := Merge(global, &RepoConfig{})
+			role := effective.ForReviewAgent(ReviewAgent{Agent: types.AgentName(tc.selected)})
+			for surface, got := range map[string]string{
+				"global":      global.QuotaProviderFor(types.AgentName(tc.selected)),
+				"effective":   effective.QuotaProviderFor(types.AgentName(tc.selected)),
+				"review role": role.QuotaProviderFor(types.AgentName(tc.selected)),
+			} {
+				if got != want {
+					t.Fatalf("selected=%s configured=%s exact=%v %s provider=%q want=%q", tc.selected, tc.configured, exact, surface, got, want)
+				}
+			}
+		}
 	}
 }

@@ -369,3 +369,23 @@ func TestQuotaSwitchDoesNotCreateUnrequestedSessions(t *testing.T) {
 		t.Fatalf("cold invocation acquired a durable session request: %+v", second.sessions)
 	}
 }
+
+func TestQuotaFallbackRestoresEitherACPAliasSpelling(t *testing.T) {
+	for _, tc := range []struct{ start, adapter string }{
+		{"cursor", "acp:cursor"}, {"acp:cursor", "cursor"},
+		{"devin", "acp:devin"}, {"acp:devin", "devin"},
+	} {
+		first := &quotaTestAgent{name: "claude", run: func(RunOpts) (*Result, error) { return nil, errors.New("exhausted agent revisited") }}
+		next := &quotaTestAgent{name: tc.adapter, resumable: true, providerOf: tc.adapter, run: func(RunOpts) (*Result, error) { return &Result{Text: "ok"}, nil }}
+		chain := NewFallback([]Agent{first, next}, WithQuotaSwitch(tc.start))
+		for _, id := range []string{"old-session", "new-session"} {
+			result, err := chain.Run(context.Background(), RunOpts{Session: &SessionRef{Agent: tc.adapter, ID: id}})
+			if err != nil || result == nil || result.Provider != tc.adapter {
+				t.Fatalf("start=%s adapter=%s result=%+v error=%v", tc.start, tc.adapter, result, err)
+			}
+		}
+		if first.calls != 0 || next.calls != 2 || len(next.sessions) != 2 || next.sessions[0].ID != "" || next.sessions[1].ID != "new-session" {
+			t.Fatalf("start=%s adapter=%s calls=%d/%d sessions=%+v", tc.start, tc.adapter, first.calls, next.calls, next.sessions)
+		}
+	}
+}

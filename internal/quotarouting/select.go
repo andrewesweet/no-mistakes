@@ -65,7 +65,7 @@ type Selection struct {
 // EvidenceFor returns the evidence recorded for one agent, or nil.
 func (s Selection) EvidenceFor(agent types.AgentName) *Evidence {
 	for i := range s.Evidence {
-		if s.Evidence[i].Agent == agent {
+		if types.CanonicalAgentName(s.Evidence[i].Agent) == types.CanonicalAgentName(agent) {
 			return &s.Evidence[i]
 		}
 	}

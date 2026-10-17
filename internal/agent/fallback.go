@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 type fallbackAgent struct {
@@ -27,7 +29,7 @@ func WithQuotaSwitch(start string) FallbackOption {
 	return func(f *fallbackAgent) {
 		f.quotaSwitch = true
 		for i, current := range f.agents {
-			if current.Name() == start {
+			if types.CanonicalAgentName(types.AgentName(current.Name())) == types.CanonicalAgentName(types.AgentName(start)) {
 				f.position.Store(int64(i))
 				f.freshSession.Store(true)
 				break

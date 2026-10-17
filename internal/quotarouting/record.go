@@ -111,9 +111,9 @@ func ParseRecord(payload string) (*Record, error) {
 // not know (dropped between runs, no longer runnable) keep their resolved
 // order at the end. It never adds or removes candidates.
 func (r *Record) OrderedAgents(resolved []types.AgentName) []types.AgentName {
-	position := make(map[string]int, len(r.Order))
+	position := make(map[types.AgentName]int, len(r.Order))
 	for i, name := range r.Order {
-		position[name] = i
+		position[types.CanonicalAgentName(types.AgentName(name))] = i
 	}
 	// Agents the record does not name (configured after the run started, or
 	// never a candidate because no provider maps them) sort after every
@@ -121,7 +121,7 @@ func (r *Record) OrderedAgents(resolved []types.AgentName) []types.AgentName {
 	// which a plain zero default would give them.
 	unranked := len(r.Order)
 	rank := func(name types.AgentName) int {
-		if pos, ok := position[string(name)]; ok {
+		if pos, ok := position[types.CanonicalAgentName(name)]; ok {
 			return pos
 		}
 		return unranked

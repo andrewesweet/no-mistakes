@@ -375,7 +375,7 @@ func newConfiguredAgent(ctx context.Context, cfg *config.Config, evidenceRoot st
 	if switchActive {
 		found := false
 		for _, name := range agents {
-			found = found || string(name) == record.CurrentAgent()
+			found = found || types.CanonicalAgentName(name) == types.CanonicalAgentName(types.AgentName(record.CurrentAgent()))
 		}
 		if !found {
 			return nil, nil, fmt.Errorf("quota routing agent %q is no longer available", record.CurrentAgent())
