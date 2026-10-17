@@ -8,6 +8,9 @@ import (
 )
 
 const (
+	// Bump matcherVersion whenever scoring semantics change. Cohorts include
+	// it so saved scores from different matching rules never aggregate.
+	matcherVersion       = 2
 	matchExactID         = "exact-id"
 	matchExactText       = "exact-text"
 	matchLocation        = "location"

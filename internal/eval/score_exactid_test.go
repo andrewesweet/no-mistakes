@@ -122,3 +122,90 @@ func mustFindingJSON(t *testing.T, id, file string, line int, description string
 	}
 	return string(raw)
 }
+
+// The exact-ID contract uses an inclusive three-line band with a known file
+// and positive line on both sides. Disjoint descriptions prevent a weaker
+// text tier from hiding a missing guard or an off-by-one error.
+func TestScoreCandidateExactIDLocationBoundaries(t *testing.T) {
+	tests := []struct {
+		name               string
+		goldFile, candFile string
+		goldLine, candLine int
+		wantMatch          bool
+	}{
+		{"minus three", "main.go", "main.go", 10, 7, true},
+		{"plus three", "main.go", "main.go", 10, 13, true},
+		{"minus four", "main.go", "main.go", 10, 6, false},
+		{"plus four", "main.go", "main.go", 10, 14, false},
+		{"normalized file", " main.go ", "main.go", 10, 10, true},
+		{"different file", "main.go", "other.go", 10, 10, false},
+		{"missing gold file", "", "main.go", 10, 10, false},
+		{"missing candidate file", "main.go", "", 10, 10, false},
+		{"both files missing", "", "", 10, 10, false},
+		{"blank gold file", " ", "main.go", 10, 10, false},
+		{"blank candidate file", "main.go", " ", 10, 10, false},
+		{"zero gold line", "main.go", "main.go", 0, 1, false},
+		{"zero candidate line", "main.go", "main.go", 1, 0, false},
+		{"negative gold line", "main.go", "main.go", -1, 1, false},
+		{"negative candidate line", "main.go", "main.go", 1, -1, false},
+		{"both lines zero", "main.go", "main.go", 0, 0, false},
+		{"both lines negative", "main.go", "main.go", -1, -1, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			labels := Labels{Findings: []FindingGold{{
+				ID: "review-1", Kind: GoldTruePositive, File: tt.goldFile,
+				Line: tt.goldLine, Description: "overflow",
+			}}}
+			candidate := mustFindingJSON(t, "review-1", tt.candFile, tt.candLine, "deadlock")
+			want := Score{FalseNegative: 1, Pending: 1}
+			if tt.wantMatch {
+				want = Score{TruePositive: 1, TruePositiveExact: 1}
+			}
+			if got := ScoreCandidate(labels, candidate); got != want {
+				t.Fatalf("score = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+// Rejecting an ID match must not reject the pair: the documented text tiers
+// ignore line distance and unknown lines. Exact text remains exact credit;
+// eight-token containment remains fuzzy credit, in either direction.
+func TestScoreCandidateRejectedExactIDFallsThrough(t *testing.T) {
+	const description = "one two three four five six seven eight"
+	tests := []struct {
+		name                             string
+		goldLine, candLine               int
+		goldDescription, candDescription string
+		wantStrength                     string
+	}{
+		{"exact text outside band", 10, 14, description, description, "exact-text"},
+		{"exact text with unknown gold line", 0, 10, description, description, "exact-text"},
+		{"exact text with unknown candidate line", 10, 0, description, description, "exact-text"},
+		{"containment outside band", 10, 14, description, description + " nine", "containment"},
+		{"reverse containment outside band", 10, 6, description + " nine", description, "containment"},
+		{"containment with unknown gold line", 0, 10, description, description + " nine", "containment"},
+		{"containment with unknown candidate line", 10, 0, description + " nine", description, "containment"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			labels := Labels{Findings: []FindingGold{{
+				ID: "review-1", Kind: GoldTruePositive, File: "main.go",
+				Line: tt.goldLine, Description: tt.goldDescription,
+			}}}
+			candidate := mustFindingJSON(t, "review-1", "main.go", tt.candLine, tt.candDescription)
+			want := Score{TruePositive: 1, TruePositiveExact: 1}
+			if tt.wantStrength == "containment" {
+				want = Score{TruePositive: 1, TruePositiveFuzzy: 1}
+			}
+			if got := ScoreCandidate(labels, candidate); got != want {
+				t.Fatalf("score = %#v, want %#v", got, want)
+			}
+			matches := assignMatches(labels.Findings, parseFindingItems(candidate))
+			if matches[0].cand != 0 || matches[0].strength != tt.wantStrength {
+				t.Fatalf("match = %#v, want candidate 0 at strength %q", matches[0], tt.wantStrength)
+			}
+		})
+	}
+}
