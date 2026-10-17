@@ -27,21 +27,32 @@ func quotaRoutingRecordForRun(ctx context.Context, cfg *config.Config, agents []
 		return nil
 	}
 	candidates := make([]quotarouting.Candidate, 0, len(agents))
+	piUnmapped := false
 	for _, name := range agents {
 		profile := cfg.AgentProfileFor(name)
 		provider := cfg.QuotaProviderFor(name)
 		if quotarouting.ResolveProvider(name, provider) == "" {
 			// One warning per unmapped agent per run: nothing is inferred
-			// from the model name, so this agent keeps its configured
-			// position and every other candidate still ranks.
+			// from the model name. An unmapped agent keeps its configured
+			// position; a Pi one disables reordering for the whole run
+			// below, every other candidate still ranks.
+			if name == types.AgentPi {
+				piUnmapped = true
+			}
 			slog.Warn("quota routing: agent has no quota_provider and none is built in; it keeps its configured position",
 				"agent", string(name))
+			continue
 		}
 		candidates = append(candidates, quotarouting.Candidate{
 			Agent:    name,
 			Model:    profile.Model,
 			Provider: provider,
 		})
+	}
+	if piUnmapped {
+		const reason = "pi has no quota_provider and none is built in; reordering disabled for this run"
+		slog.Warn("quota routing: " + reason)
+		return quotarouting.NewFailureRecord(true, configured, reason)
 	}
 	snapshot, err := quotarouting.ReadSnapshot(ctx, cfg.QuotaRouting.QuotaAXIPath, cfg.QuotaRouting.ReadTimeout)
 	if err != nil {

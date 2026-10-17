@@ -140,6 +140,37 @@ func TestQuotaRoutingRecordForRun_FailingQuotaAXIKeepsConfiguredOrder(t *testing
 	}
 }
 
+func TestQuotaRoutingRecordForRun_PiWithoutQuotaProviderDisablesReordering(t *testing.T) {
+	// The published intent: a Pi agent with no declared quota_provider and no
+	// built-in mapping disables reordering for the whole run with one
+	// warning, rather than guessing from the model name. The failure record
+	// keeps the configured order, never arms the switch, and records why.
+	cfg := quotaRoutingConfig(writeQuotaAXI(t, claudeThenCodexSnapshot))
+	cfg.Agents = []types.AgentName{types.AgentPi, types.AgentClaude, types.AgentCodex}
+	record := quotaRoutingRecordForRun(context.Background(), cfg, cfg.Agents)
+	if record == nil || !record.Enabled || record.Choice != "pi" {
+		t.Fatalf("pi without quota_provider keeps the configured order, got %+v", record)
+	}
+	if record.Selected {
+		t.Fatal("a pi-disabled run is not a live selection and must not arm the switch")
+	}
+	if !strings.Contains(record.Reason, "pi has no quota_provider") {
+		t.Fatalf("the record must say why reordering was disabled, got %q", record.Reason)
+	}
+}
+
+func TestQuotaRoutingRecordForRun_PiWithQuotaProviderStillRanks(t *testing.T) {
+	// The declared quota_provider makes the Pi candidate a normal candidate:
+	// it ranks, and the run reorders.
+	cfg := quotaRoutingConfig(writeQuotaAXI(t, claudeThenCodexSnapshot))
+	cfg.Agents = []types.AgentName{types.AgentPi, types.AgentClaude}
+	cfg.QuotaProviders = map[string]string{"pi": "codex"}
+	record := quotaRoutingRecordForRun(context.Background(), cfg, cfg.Agents)
+	if record == nil || !record.Selected {
+		t.Fatalf("a mapped pi is a normal candidate, got %+v", record)
+	}
+}
+
 func TestQuotaRoutingRecordForRun_UnmappedAgentKeepsItsPosition(t *testing.T) {
 	// opencode has no built-in provider mapping and the config declares no
 	// quota_provider for it: it stays eligible in its configured position and

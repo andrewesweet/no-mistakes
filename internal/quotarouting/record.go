@@ -121,9 +121,20 @@ func (r *Record) OrderedAgents(resolved []types.AgentName) []types.AgentName {
 	for i, name := range r.Order {
 		position[name] = i
 	}
+	// Agents the record does not name (configured after the run started, or
+	// never a candidate because no provider maps them) sort after every
+	// named one in their resolved relative order - never beside the head,
+	// which a plain zero default would give them.
+	unranked := len(r.Order)
+	rank := func(name types.AgentName) int {
+		if pos, ok := position[string(name)]; ok {
+			return pos
+		}
+		return unranked
+	}
 	out := append([]types.AgentName{}, resolved...)
 	sort.SliceStable(out, func(a, b int) bool {
-		return position[string(out[a])] < position[string(out[b])]
+		return rank(out[a]) < rank(out[b])
 	})
 	return out
 }
