@@ -98,7 +98,12 @@ type Run struct {
 	// by the PR step.
 	OmitIntent bool
 	// PiProfile is immutable launch selection; nil retains legacy live config.
-	PiProfile        *agentcfg.PiProfile
+	PiProfile *agentcfg.PiProfile
+	// QuotaRouting is the run's quota-aware agent ordering record (the
+	// quotarouting.Record JSON), written at run setup when the feature is on
+	// and appended to when a mid-run quota switch moves the run. Empty for
+	// runs from before the feature and whenever it is off. It is local-only.
+	QuotaRouting     string
 	VerificationPlan *verificationplan.Snapshot
 	// ClosingIssueRefs are the explicit issues (axi run --closes) the generated
 	// PR should close, canonicalized by internal/closingissues.
@@ -110,7 +115,7 @@ type Run struct {
 	UpdatedAt                int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), ci_released_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, pr_base_branch, COALESCE(omit_intent, 0), pi_profile, verification_plan, closing_issue_refs, closing_issue_refs_locked_at, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), ci_released_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, pr_base_branch, COALESCE(omit_intent, 0), pi_profile, COALESCE(quota_routing, ''), verification_plan, closing_issue_refs, closing_issue_refs_locked_at, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -124,7 +129,7 @@ func scanRun(row interface {
 		&r.CustodyReturnedAt, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
 		&r.LaunchNonce, &r.LaunchValidationGeneration, &r.LaunchIntentDigest, &r.LaunchReceiptClaimedAt,
-		&r.PRBaseBranch, &r.OmitIntent, &r.PiProfile, &r.VerificationPlan,
+		&r.PRBaseBranch, &r.OmitIntent, &r.PiProfile, &r.QuotaRouting, &r.VerificationPlan,
 		&storedClosingIssues, &r.ClosingIssueRefsLockedAt,
 		&r.CreatedAt, &r.UpdatedAt,
 	)
@@ -1410,6 +1415,33 @@ func (d *DB) SetRunGates(id, gates string) error {
 		return fmt.Errorf("set run gates: %w", err)
 	}
 	return nil
+}
+
+// SetRunQuotaRouting records (or amends) one run's quota-aware agent
+// ordering payload. The daemon owns the read-modify-write: it reads the run's
+// record, appends a mid-run switch, and writes the whole record back, so the
+// database stores an opaque JSON blob exactly as it does for the CI rerun
+// state.
+func (d *DB) SetRunQuotaRouting(id, payload string) error {
+	_, err := d.sql.Exec(`UPDATE runs SET quota_routing = ?, updated_at = ? WHERE id = ?`, payload, now(), id)
+	if err != nil {
+		return fmt.Errorf("set run quota routing: %w", err)
+	}
+	return nil
+}
+
+// GetRunQuotaRouting returns the run's stored quota-routing payload, or the
+// empty string when the run has none (feature off, or a pre-feature run).
+func (d *DB) GetRunQuotaRouting(id string) (string, error) {
+	var payload sql.NullString
+	err := d.sql.QueryRow(`SELECT quota_routing FROM runs WHERE id = ?`, id).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get run quota routing: %w", err)
+	}
+	return payload.String, nil
 }
 
 // GetRunCIRerunState returns the CI step's persisted rerun budget for a run, or

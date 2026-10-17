@@ -111,9 +111,10 @@ func emitAgentFallback(opts RunOpts, current, next string, err error) {
 
 func emitAgentQuotaSwitch(opts RunOpts, current, next string, err error) {
 	emitAgentControl(opts, LifecycleEvent{
-		Agent:   current,
-		Phase:   LifecyclePhaseQuotaSwitch,
-		Message: fmt.Sprintf("agent %s exhausted its quota (%s); switching to %s with a fresh session", current, fallbackReason(err), next),
+		Agent:     current,
+		Phase:     LifecyclePhaseQuotaSwitch,
+		NextAgent: next,
+		Message:   fmt.Sprintf("agent %s exhausted its quota (%s); switching to %s with a fresh session", current, fallbackReason(err), next),
 	})
 }
 

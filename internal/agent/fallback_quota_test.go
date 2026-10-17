@@ -71,6 +71,11 @@ func TestFallbackQuotaSwitchMovesToTheNextAgentOnAQuotaError(t *testing.T) {
 		if event.Agent != "claude" || !strings.Contains(event.Message, "codex") {
 			t.Fatalf("quota switch event = %+v, want claude -> codex", event)
 		}
+		// The executor's switch recorder keys on the structured field, never
+		// on parsing the prose.
+		if event.NextAgent != "codex" {
+			t.Fatalf("quota switch event NextAgent = %q, want codex", event.NextAgent)
+		}
 		if !strings.Contains(event.Message, "fresh session") {
 			t.Fatalf("quota switch event = %+v, want it to name the fresh session", event)
 		}

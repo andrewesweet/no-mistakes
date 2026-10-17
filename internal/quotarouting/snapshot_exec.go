@@ -29,6 +29,11 @@ func ReadSnapshot(ctx context.Context, exe string, timeout time.Duration) (*Snap
 	readCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(readCtx, exe, "--json")
+	// Killing the direct child does not close the stdout pipe when the child
+	// was a script whose grandchild (e.g. a sleep it exec'd) inherits the
+	// descriptor; without WaitDelay, Run would block on that orphan until IT
+	// exits, defeating the timeout exactly when quota-axi is wedged.
+	cmd.WaitDelay = 250 * time.Millisecond
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &boundedBuffer{limit: maxSnapshotBytes, inner: &stdout}
 	cmd.Stderr = &stderr

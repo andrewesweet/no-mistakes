@@ -247,6 +247,10 @@ type LifecycleEvent struct {
 	Phase   string
 	PID     int
 	Message string
+	// NextAgent names the agent a LifecyclePhaseQuotaSwitch event moves the
+	// run to, so the executor can record the switch on the run's quota-routing
+	// record without parsing the prose. Empty on every other phase.
+	NextAgent string
 }
 
 // Result holds the output of an agent invocation.

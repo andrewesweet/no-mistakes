@@ -32,6 +32,11 @@ type Record struct {
 	// the configured order was kept (quota-axi missing, slow, unreadable, or
 	// a Pi candidate without quota_provider).
 	Reason string `json:"reason"`
+	// Selected is true only when the order came from a live selection against
+	// a snapshot. A failure record re-orders nothing and must not arm the
+	// mid-run switch: without evidence there is no chosen order to advance
+	// through, so a quota error stays today's terminal fallback.
+	Selected bool `json:"selected"`
 	// Candidates carries per-candidate evidence in the configured order.
 	Candidates []Evidence `json:"candidates,omitempty"`
 	// Switches lists the mid-run quota-exhaustion switches in order.
@@ -60,6 +65,7 @@ func NewRecord(enabled bool, configured, order []types.AgentName, selection Sele
 		Order:      agentNamesText(order),
 		Choice:     string(selection.Choice),
 		Reason:     selection.Reason,
+		Selected:   true,
 		Candidates: selection.Evidence,
 	}
 	return record
