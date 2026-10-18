@@ -238,7 +238,7 @@ func evaluate(snapshot *Snapshot, candidate Candidate, expectedRunLength time.Du
 		return evidence
 	}
 
-	rows := applicableRows(row, candidate.Model)
+	rows := applicableRows(row, candidate)
 	if len(rows) == 0 {
 		evidence.Reason = "no applicable quota row for provider " + candidate.Provider
 		return evidence
@@ -355,22 +355,17 @@ func bindRow(snapshot *Snapshot, candidate Candidate) (*Provider, bool) {
 }
 
 // applicableRows returns the effective quota scopes for the configured model.
-func applicableRows(row *Provider, model string) []EffectiveAvailability {
+func applicableRows(row *Provider, candidate Candidate) []EffectiveAvailability {
+	model := ""
+	if candidate.Agent == types.AgentClaude || candidate.Agent == types.AgentCodex {
+		model = candidate.Model
+	}
 	bare := model
 	if i := strings.LastIndex(bare, "/"); i >= 0 {
 		bare = bare[i+1:]
 	}
 	if row.Provider == "claude" {
 		bare = strings.TrimSuffix(bare, "[1m]")
-	}
-	agyScope := ""
-	if row.Provider == "agy" {
-		switch {
-		case strings.HasPrefix(bare, "gemini-"):
-			agyScope = "gemini"
-		case strings.HasPrefix(bare, "claude-"), strings.HasPrefix(bare, "gpt-"):
-			agyScope = "claude_gpt"
-		}
 	}
 	var rows []EffectiveAvailability
 	for _, r := range row.QuotaSemantics.EffectiveAvailability {
@@ -384,12 +379,6 @@ func applicableRows(row *Provider, model string) []EffectiveAvailability {
 		modelScope, scopedModel := strings.CutPrefix(scope, "model:")
 		switch {
 		case scope == "all_models" || scope == "all_products":
-			rows = append(rows, r)
-		case row.Provider == "devin" && scope == "included_quota",
-			(row.Provider == "commandcode" || row.Provider == "higgsfield") && scope == "included_credits",
-			row.Provider == "elevenlabs" && scope == "included_characters":
-			rows = append(rows, r)
-		case row.Provider == "agy" && (scope == "gemini" || scope == "claude_gpt") && (model == "" || scope == agyScope):
 			rows = append(rows, r)
 		case model != "" && scope == "model:"+bare:
 			rows = append(rows, r)

@@ -863,6 +863,8 @@ When `enabled: true`, no-mistakes reads **one** snapshot from the locally instal
 - Surviving agents rank by quota-axi's own `spendPriority` (the minimum across the scopes that apply to the agent's configured model); ties keep your configured order.
 - An agent with no readable quota evidence - its provider is unmeasured, or no provider mapping exists for it - stays eligible but ranks below every measured one.
 
+Native `claude` and `codex` retain account, profile, and model-scope matching. All other agents, including Pi, use only provider-level `all_models` or `all_products` scopes for their declared provider. Vendor-specific and named-model scopes do not affect their routing. Without provider-wide evidence, quota is unknown: the agent stays eligible and retains its configured order among unknown candidates.
+
 Each agent keeps its own [`agent_config`](#agent_config) model and effort: only the order changes. A missing, slow, or unreadable `quota-axi` keeps your configured order, logs the reason, and never blocks a run; nothing is sent anywhere - the snapshot is read from your local `quota-axi` and the outcome is recorded on the local run only (`no-mistakes axi status`, `no-mistakes stats`, and `no-mistakes stats --run RUN_ID` show the candidates, the evidence, and the choice).
 
 Mid-run, a recognised quota error on the active agent moves the run **once** to the next agent in the chosen order, with a fresh session (any resumed session is dropped), and it never moves back. The existing agent-unavailable fallback is unchanged.
