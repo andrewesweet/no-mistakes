@@ -824,52 +824,66 @@ func TestSelectClaudeContextSuffixPreservesQuotaScopes(t *testing.T) {
 	}
 }
 
-func TestSelectNativeClaudeBindsSelectedProfileWithoutLocator(t *testing.T) {
-	for _, scenario := range []struct {
-		schema  int
-		sibling bool
+func TestSelectNativeClaudeBindsSingleSelectedSchema5Profile(t *testing.T) {
+	for _, tc := range []struct {
+		percent  float64
+		eligible bool
+		choice   types.AgentName
 	}{
-		{5, false}, {6, false}, {6, true},
+		{0, false, types.AgentOpenCode},
+		{80, true, types.AgentClaude},
 	} {
-		schema := scenario.schema
-		for _, tc := range []struct {
-			percent  float64
-			eligible bool
-			choice   types.AgentName
+		snapshot := fixtureSnapshot(t, 5, `{"provider":"claude","accountKeys":["profile:selected"],"quotaSemantics":{"status":"known","effectiveAvailability":[`+knownRow("all_models", tc.percent, throughReset(), 3)+`]}}`)
+		selection := Select(snapshot, []Candidate{{Agent: types.AgentClaude}, {Agent: types.AgentOpenCode}}, defaultExpectedRunLength)
+		evidence := selection.EvidenceFor(types.AgentClaude)
+		if selection.Choice != tc.choice || evidence.Eligible != tc.eligible || evidence.Rankable != tc.eligible || evidence.Account != "profile:selected" {
+			t.Fatalf("percent=%g selection=%+v", tc.percent, selection)
+		}
+		for _, named := range []struct {
+			model, account string
+			eligible       bool
 		}{
-			{0, false, types.AgentOpenCode},
-			{80, true, types.AgentClaude},
+			{"profile:selected/opus", "profile:selected", tc.eligible},
+			{"profile:missing/opus", "", true},
 		} {
-			own := ""
-			if schema == 6 {
-				own = `"accountKey":"profile:selected",`
+			selection = Select(snapshot, []Candidate{{Agent: types.AgentPi, Provider: "claude", Model: named.model}}, defaultExpectedRunLength)
+			evidence = selection.EvidenceFor(types.AgentPi)
+			if evidence.Account != named.account || evidence.Eligible != named.eligible {
+				t.Fatalf("model=%s evidence=%+v", named.model, evidence)
 			}
-			providers := []string{`{"provider":"claude",` + own + `"accountKeys":["profile:selected"],"quotaSemantics":{"status":"known","effectiveAvailability":[` + knownRow("all_models", tc.percent, throughReset(), 3) + `]}}`}
-			if scenario.sibling {
-				providers = append(providers, `{"provider":"claude","accountKey":"profile:sibling","accountKeys":["profile:sibling"],"quotaSemantics":{"status":"known","effectiveAvailability":[`+knownRow("all_models", 80, throughReset(), 5)+`]}}`)
-			}
-			if schema == 6 && !scenario.sibling {
-				providers = append(providers, `{"provider":"codex","accountKey":"codex-home","accountKeys":["codex-home"]}`, `{"provider":"codex","accountKey":"openai-codex-work","accountKeys":["openai-codex-work"]}`)
-			}
-			snapshot := fixtureSnapshot(t, schema, providers...)
-			selection := Select(snapshot, []Candidate{{Agent: types.AgentClaude}, {Agent: types.AgentOpenCode}}, defaultExpectedRunLength)
-			evidence := selection.EvidenceFor(types.AgentClaude)
-			if selection.Choice != tc.choice || evidence.Eligible != tc.eligible || evidence.Rankable != tc.eligible || evidence.Account != "profile:selected" {
-				t.Fatalf("schema=%d percent=%g selection=%+v", schema, tc.percent, selection)
-			}
-			for _, named := range []struct {
-				model    string
-				account  string
-				eligible bool
-			}{
-				{"profile:selected/opus", "profile:selected", tc.eligible},
-				{"profile:missing/opus", "", true},
-			} {
-				selection = Select(snapshot, []Candidate{{Agent: types.AgentPi, Provider: "claude", Model: named.model}}, defaultExpectedRunLength)
-				evidence = selection.EvidenceFor(types.AgentPi)
-				if evidence.Account != named.account || evidence.Eligible != named.eligible {
-					t.Fatalf("schema=%d model=%s evidence=%+v", schema, named.model, evidence)
+		}
+	}
+}
+
+func TestSelectNativeClaudeNeverBorrowsUnselectedAccounts(t *testing.T) {
+	for _, tc := range []struct {
+		schema int
+		keys   []string
+	}{
+		{5, []string{"claude-swap:work"}},
+		{6, []string{"claude-swap:work", "claude-swap:personal"}},
+		{6, []string{"claude-swap:personal", "claude-swap:work"}},
+		{6, []string{"profile:unselected", "profile:other"}},
+	} {
+		for _, pct := range []float64{0, 80} {
+			providers := []string{`{"provider":"codex","accountKey":"codex-home","accountKeys":["codex-home"],"quotaSemantics":{"status":"known","effectiveAvailability":[` + knownRow("all_models", 70, throughReset(), 1) + `]}}`}
+			for _, key := range tc.keys {
+				own := ""
+				if tc.schema == 6 {
+					own = `"accountKey":"` + key + `",`
 				}
+				providers = append(providers, `{"provider":"claude",`+own+`"accountKeys":["`+key+`"],"quotaSemantics":{"status":"known","effectiveAvailability":[`+knownRow("all_models", pct, throughReset(), 3)+`]}}`)
+			}
+			snapshot := fixtureSnapshot(t, tc.schema, providers...)
+			selection := Select(snapshot, []Candidate{{Agent: types.AgentClaude}, {Agent: types.AgentCodex}}, defaultExpectedRunLength)
+			evidence := selection.EvidenceFor(types.AgentClaude)
+			if selection.Choice != types.AgentCodex || !evidence.Eligible || evidence.Rankable || evidence.Account != "" {
+				t.Fatalf("schema=%d keys=%v percent=%g selection=%+v", tc.schema, tc.keys, pct, selection)
+			}
+			selection = Select(snapshot, []Candidate{{Agent: types.AgentPi, Provider: "claude", Model: tc.keys[0] + "/opus"}}, defaultExpectedRunLength)
+			evidence = selection.EvidenceFor(types.AgentPi)
+			if evidence.Account != tc.keys[0] || evidence.Eligible != (pct > 0) {
+				t.Fatalf("named Pi credential lost its membership binding: %+v", evidence)
 			}
 		}
 	}

@@ -336,10 +336,15 @@ func bindRow(snapshot *Snapshot, candidate Candidate) (*Provider, bool) {
 		if lane != "" && (row.AccountKey == lane || slices.Contains(row.AccountKeys, lane)) {
 			return row, true
 		}
-		if nativeClaude && row.AccountLocator != nil && row.AccountLocator.DelegateEligible {
-			return row, true
+		if nativeClaude {
+			if row.AccountLocator != nil && row.AccountLocator.DelegateEligible {
+				return row, true
+			}
+			if snapshot.SchemaVersion == 5 && row.AccountKey == "" && len(row.AccountKeys) == 1 && strings.HasPrefix(row.AccountKeys[0], "profile:") {
+				return row, true
+			}
 		}
-		if fallback == nil && lane == "" && (nativeClaude || row.AccountKey == "default" || slices.Contains(row.AccountKeys, "default")) {
+		if fallback == nil && lane == "" && (row.AccountKey == "default" || slices.Contains(row.AccountKeys, "default")) {
 			fallback = row
 		}
 	}
