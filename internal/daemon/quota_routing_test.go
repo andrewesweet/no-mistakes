@@ -416,8 +416,8 @@ func TestQuotaRoutingUsesTheEffectiveRawModelForScopesAndAccount(t *testing.T) {
 	cfg.AgentArgsOverride = map[string][]string{"pi": {"--model", "work/opus"}}
 	cfg.QuotaProviders = map[string]string{"pi": "codex"}
 	record := quotaRoutingRecordForRun(context.Background(), cfg, cfg.Agents)
-	if record.Choice != "codex" || record.Candidates[0].Account != "work" || record.Candidates[0].Eligible || record.Candidates[0].Scope != "model:opus" {
-		t.Fatalf("raw model must bind work account and exhausted opus scope: %+v", record)
+	if record.Choice != "codex" || record.Candidates[0].Account != "work" || !record.Candidates[0].Eligible || record.Candidates[0].Rankable || record.Candidates[0].Scope != "" {
+		t.Fatalf("raw model must bind work account while model-only Pi quota stays unknown: %+v", record)
 	}
 }
 
