@@ -12,9 +12,9 @@ import (
 // Candidate is one agent considered for ordering, in the configured order.
 type Candidate struct {
 	Agent types.AgentName
-	// Model is the agent's configured agent_config model, "" when unset. Only
-	// its last path segment names a model scope; it is never used to infer a
-	// provider.
+	// Model is the effective model after native raw overrides, "" when unset.
+	// Native claude/codex use its last path segment for scope matching; Pi may
+	// use its prefix for credential binding. It never infers a provider.
 	Model string
 	// Provider is the agent's DECLARED quota_provider from agent_config, ""
 	// when none. Select resolves the built-in claude/codex mapping on top of

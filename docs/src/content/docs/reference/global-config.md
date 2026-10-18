@@ -321,7 +321,8 @@ resolve to nonempty values before a run starts. Use a provider-qualified model
 ID from Pi's catalog, not a bare name, URL, glob, or `:thinking` suffix.
 Supported effort spellings are `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
 Availability, authentication, and model-specific reasoning support remain Pi's
-responsibility; no-mistakes does not inspect subscriptions or query quotas.
+responsibility. For optional quota evidence at run start, see
+[quota-aware routing](#quota_routing).
 
 A pin applies to **every pipeline duty**, including reviewer and fixer roles.
 The effective agent selection must be Pi-only (no `auto`, non-Pi fallbacks, or
