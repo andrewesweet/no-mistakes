@@ -354,9 +354,7 @@ func bindRow(snapshot *Snapshot, candidate Candidate) (*Provider, bool) {
 	return nil, false
 }
 
-// applicableRows returns the provider-wide scopes plus the exact model or
-// product scope for the candidate's configured model. A named scope bounds
-// that model alone; the provider-wide scope bounds everything in the family.
+// applicableRows returns the effective quota scopes for the configured model.
 func applicableRows(row *Provider, model string) []EffectiveAvailability {
 	bare := model
 	if i := strings.LastIndex(bare, "/"); i >= 0 {
@@ -368,6 +366,9 @@ func applicableRows(row *Provider, model string) []EffectiveAvailability {
 	var rows []EffectiveAvailability
 	for _, r := range row.QuotaSemantics.EffectiveAvailability {
 		scope := r.Scope
+		if row.Provider == "codex" && bare != "" && scope == "model:"+bare {
+			return []EffectiveAvailability{r}
+		}
 		if row.Provider == "claude" && scope == "seven_day_opus" {
 			scope = "model:opus"
 		}

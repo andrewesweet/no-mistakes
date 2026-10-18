@@ -888,3 +888,69 @@ func TestSelectNativeClaudeNeverBorrowsUnselectedAccounts(t *testing.T) {
 		}
 	}
 }
+
+func TestSelectCodexMatchingScopeOwnsEffectiveVerdict(t *testing.T) {
+	const conflict = `{"scope":"model:gpt-5.1-codex","status":"unknown","boundedBy":["primary","model:gpt-5.1-codex"],"boundConflict":{"exhaustedWindowIds":["primary"],"liveWindowIds":["model:gpt-5.1-codex"]},"runway":{"status":"unknown","unmeasurableWindowIds":["primary","model:gpt-5.1-codex"]},"selection":{"status":"unknown","unmeasurableWindowIds":["primary","model:gpt-5.1-codex"]}}`
+	const unknownModel = `{"scope":"model:gpt-5.1-codex","status":"unknown","runway":{"status":"unknown"},"selection":{"status":"unknown"}}`
+	for _, tc := range []struct {
+		name, broad, model string
+		eligible, rankable bool
+		choice             int
+		priority           float64
+	}{
+		{"conflict overrides inherited exhaustion", knownRow("all_models", 0, exhaustedNow(), -5), conflict, true, false, 0, 0},
+		{"conflict overrides inherited zero", knownRow("all_models", 0, unknownRunway(), -5), conflict, true, false, 0, 0},
+		{"model uncertainty overrides broad projection", knownRow("all_models", 20, projectedExhaustion(600), -5), unknownModel, true, false, 0, 0},
+		{"model priority governs ranking", knownRow("all_models", 80, throughReset(), -5), knownRow("model:gpt-5.1-codex", 40, throughReset(), 2), true, true, 0, 2},
+		{"model remains measured despite broad uncertainty", `{"scope":"all_models","status":"unknown"}`, knownRow("model:gpt-5.1-codex", 40, throughReset(), 2), true, true, 0, 2},
+		{"model exhaustion still binds", knownRow("all_models", 80, throughReset(), 3), knownRow("model:gpt-5.1-codex", 0, exhaustedNow(), -5), false, false, 1, 0},
+		{"model zero still binds", knownRow("all_models", 80, throughReset(), 3), knownRow("model:gpt-5.1-codex", 0, unknownRunway(), -5), false, false, 1, 0},
+		{"model projection still binds", knownRow("all_models", 80, throughReset(), 3), knownRow("model:gpt-5.1-codex", 40, projectedExhaustion(600), -5), false, false, 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, schema := range []int{5, 6} {
+				for _, candidate := range []Candidate{
+					{Agent: types.AgentCodex, Model: "gpt-5.1-codex"},
+					{Agent: types.AgentCodex, Model: "openai/gpt-5.1-codex"},
+					{Agent: types.AgentPi, Provider: "codex", Model: "openai-codex-work/gpt-5.1-codex"},
+				} {
+					for _, reverse := range []bool{false, true} {
+						rows := []string{tc.broad, tc.model}
+						if reverse {
+							rows[0], rows[1] = rows[1], rows[0]
+						}
+						own := ""
+						if schema == 6 {
+							own = `"accountKey":"codex-home",`
+						}
+						snapshot := fixtureSnapshot(t, schema, `{"provider":"codex",`+own+`"accountKeys":["codex-home","openai-codex-work"],"quotaSemantics":{"status":"known","effectiveAvailability":[`+strings.Join(rows, ",")+`]}}`)
+						candidates := []Candidate{candidate, {Agent: types.AgentOpenCode}}
+						selection := Select(snapshot, candidates, defaultExpectedRunLength)
+						evidence := selection.EvidenceFor(candidate.Agent)
+						if selection.Choice != candidates[tc.choice].Agent || evidence.Eligible != tc.eligible || evidence.Rankable != tc.rankable || evidence.Scope != "model:gpt-5.1-codex" {
+							t.Fatalf("schema=%d candidate=%+v reversed=%v selection=%+v", schema, candidate, reverse, selection)
+						}
+						if tc.rankable {
+							if evidence.SpendPriority == nil || *evidence.SpendPriority != tc.priority {
+								t.Fatalf("wrong model priority: %+v", evidence)
+							}
+						} else if evidence.SpendPriority != nil {
+							t.Fatalf("unrankable scope fabricated a priority: %+v", evidence)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestSelectCodexKeepsAccountBoundsWithoutAMatchingModelScope(t *testing.T) {
+	for _, model := range []string{"", "gpt-other", "openai/gpt-other"} {
+		snapshot := fixtureSnapshot(t, 5, `{"provider":"codex","accountKeys":["codex-home"],"quotaSemantics":{"status":"known","effectiveAvailability":[`+knownRow("all_models", 0, exhaustedNow(), -5)+`,`+knownRow("model:gpt-5.1-codex", 80, throughReset(), 3)+`]}}`)
+		selection := Select(snapshot, []Candidate{{Agent: types.AgentCodex, Model: model}, {Agent: types.AgentOpenCode}}, defaultExpectedRunLength)
+		evidence := selection.EvidenceFor(types.AgentCodex)
+		if selection.Choice != types.AgentOpenCode || evidence.Eligible || evidence.Scope != "all_models" {
+			t.Fatalf("model=%s selection=%+v", model, selection)
+		}
+	}
+}
