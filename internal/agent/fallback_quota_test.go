@@ -189,7 +189,7 @@ func TestFallbackQuotaSwitchRecognizesEveryExistingQuotaShape(t *testing.T) {
 		"insufficient quota":       errors.New("codex failed: insufficient quota"),
 		"exceeded current quota":   errors.New("codex failed: You exceeded your current quota, please check your plan and billing details"),
 		"quota exhausted":          errors.New("grok failed: quota exhausted"),
-		"claude usage limit event": &claudeAPIError{Status: 429, UsageLimitReached: true, Message: "rate limited"},
+		"claude usage limit event": &claudeAPIError{Status: 429, usageLimitReached: true, Message: "rate limited"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if !IsQuotaExhaustionError(quotaErr) {

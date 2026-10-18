@@ -320,7 +320,7 @@ func IsQuotaExhaustionError(err error) bool {
 	}
 	var apiErr *claudeAPIError
 	if errors.As(err, &apiErr) {
-		if apiErr.UsageLimitReached {
+		if apiErr.UsageLimitReached() {
 			return true
 		}
 		return isTerminalRetryError(strings.ToLower(apiErr.Message))
