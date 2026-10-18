@@ -150,13 +150,14 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 		}
 		startedAt := time.Now()
 		result, err := current.Run(ctx, currentOpts)
+		quotaExhausted := a.quotaSwitch && IsQuotaExhaustionError(err)
 		if err != nil {
 			if result == nil {
 				result = &Result{}
 			}
-			if result.ResumeAttempted == nil {
-				attempted := currentOpts.Session != nil && currentOpts.Session.ID != ""
-				result.ResumeAttempted = &attempted
+			if result.ResumeRetryable == nil || quotaExhausted {
+				retryable := currentOpts.Session != nil && currentOpts.Session.ID != "" && !quotaExhausted
+				result.ResumeRetryable = &retryable
 			}
 		}
 		if !ReportsAgentAttempts(current) {
@@ -181,7 +182,7 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 		if i == len(candidates)-1 {
 			return result, err
 		}
-		if a.quotaSwitch && IsQuotaExhaustionError(err) {
+		if quotaExhausted {
 			next := candidates[i+1]
 			position := int64(start + i + 1)
 			for previous := a.position.Load(); previous < position; previous = a.position.Load() {

@@ -823,3 +823,54 @@ func TestSelectClaudeContextSuffixPreservesQuotaScopes(t *testing.T) {
 		}
 	}
 }
+
+func TestSelectNativeClaudeBindsSelectedProfileWithoutLocator(t *testing.T) {
+	for _, scenario := range []struct {
+		schema  int
+		sibling bool
+	}{
+		{5, false}, {6, false}, {6, true},
+	} {
+		schema := scenario.schema
+		for _, tc := range []struct {
+			percent  float64
+			eligible bool
+			choice   types.AgentName
+		}{
+			{0, false, types.AgentOpenCode},
+			{80, true, types.AgentClaude},
+		} {
+			own := ""
+			if schema == 6 {
+				own = `"accountKey":"profile:selected",`
+			}
+			providers := []string{`{"provider":"claude",` + own + `"accountKeys":["profile:selected"],"quotaSemantics":{"status":"known","effectiveAvailability":[` + knownRow("all_models", tc.percent, throughReset(), 3) + `]}}`}
+			if scenario.sibling {
+				providers = append(providers, `{"provider":"claude","accountKey":"profile:sibling","accountKeys":["profile:sibling"],"quotaSemantics":{"status":"known","effectiveAvailability":[`+knownRow("all_models", 80, throughReset(), 5)+`]}}`)
+			}
+			if schema == 6 && !scenario.sibling {
+				providers = append(providers, `{"provider":"codex","accountKey":"codex-home","accountKeys":["codex-home"]}`, `{"provider":"codex","accountKey":"openai-codex-work","accountKeys":["openai-codex-work"]}`)
+			}
+			snapshot := fixtureSnapshot(t, schema, providers...)
+			selection := Select(snapshot, []Candidate{{Agent: types.AgentClaude}, {Agent: types.AgentOpenCode}}, defaultExpectedRunLength)
+			evidence := selection.EvidenceFor(types.AgentClaude)
+			if selection.Choice != tc.choice || evidence.Eligible != tc.eligible || evidence.Rankable != tc.eligible || evidence.Account != "profile:selected" {
+				t.Fatalf("schema=%d percent=%g selection=%+v", schema, tc.percent, selection)
+			}
+			for _, named := range []struct {
+				model    string
+				account  string
+				eligible bool
+			}{
+				{"profile:selected/opus", "profile:selected", tc.eligible},
+				{"profile:missing/opus", "", true},
+			} {
+				selection = Select(snapshot, []Candidate{{Agent: types.AgentPi, Provider: "claude", Model: named.model}}, defaultExpectedRunLength)
+				evidence = selection.EvidenceFor(types.AgentPi)
+				if evidence.Account != named.account || evidence.Eligible != named.eligible {
+					t.Fatalf("schema=%d model=%s evidence=%+v", schema, named.model, evidence)
+				}
+			}
+		}
+	}
+}

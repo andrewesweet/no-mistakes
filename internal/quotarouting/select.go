@@ -324,6 +324,7 @@ func evaluate(snapshot *Snapshot, candidate Candidate, expectedRunLength time.Du
 func bindRow(snapshot *Snapshot, candidate Candidate) (*Provider, bool) {
 	var fallback *Provider
 	lane := Lane(candidate.Agent, candidate.Model, candidate.Provider)
+	nativeClaude := candidate.Agent == types.AgentClaude && candidate.Provider == "claude"
 	for i := range snapshot.Providers {
 		row := &snapshot.Providers[i]
 		if row.Provider != candidate.Provider {
@@ -335,10 +336,10 @@ func bindRow(snapshot *Snapshot, candidate Candidate) (*Provider, bool) {
 		if lane != "" && (row.AccountKey == lane || slices.Contains(row.AccountKeys, lane)) {
 			return row, true
 		}
-		if candidate.Agent == types.AgentClaude && candidate.Provider == "claude" && row.AccountLocator != nil && row.AccountLocator.DelegateEligible {
+		if nativeClaude && row.AccountLocator != nil && row.AccountLocator.DelegateEligible {
 			return row, true
 		}
-		if lane == "" && (row.AccountKey == "default" || slices.Contains(row.AccountKeys, "default")) && fallback == nil {
+		if fallback == nil && lane == "" && (nativeClaude || row.AccountKey == "default" || slices.Contains(row.AccountKeys, "default")) {
 			fallback = row
 		}
 	}

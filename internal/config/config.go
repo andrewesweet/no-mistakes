@@ -1572,8 +1572,9 @@ session_reuse: true
 # configured order, logs why, and never blocks a run. Mid-run, a recognised
 # quota error moves the run once to the next agent in the chosen order with a
 # fresh session. claude and codex map to their quota-axi providers
-# automatically; any other agent needs quota_provider under agent_config, and
-# an unmapped agent keeps its configured position with one warning.
+# automatically. Other agents can declare quota_provider under agent_config.
+# An unmapped pi disables routing for the run with one warning; other unmapped
+# agents rank as unknown quota below agents with known headroom.
 # quota_routing:
 #   enabled: true
 #   # Runway floor: an agent projected to run out inside this window is not
@@ -1618,9 +1619,8 @@ log_level: info
 #     model: openai/gpt-5
 #   # quota_provider names the quota-axi provider id quota-aware routing reads
 #   # this agent's evidence from (only read when quota_routing is enabled).
-#   # claude and codex never need it; pi pointing at codex does, unless its
-#   # model already names the account (codex-native/<model> reads codex-home,
-#   # <account>/<model> reads that account).
+#   # claude and codex never need it; pi always requires an explicit provider,
+#   # including when its model names a Codex account.
 #   pi:
 #     quota_provider: codex
 #
