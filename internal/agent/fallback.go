@@ -150,6 +150,15 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 		}
 		startedAt := time.Now()
 		result, err := current.Run(ctx, currentOpts)
+		if err != nil {
+			if result == nil {
+				result = &Result{}
+			}
+			if result.ResumeAttempted == nil {
+				attempted := currentOpts.Session != nil && currentOpts.Session.ID != ""
+				result.ResumeAttempted = &attempted
+			}
+		}
 		if !ReportsAgentAttempts(current) {
 			emitAgentAttempt(currentOpts, current.Name(), result, err, startedAt, time.Now())
 		}
@@ -167,10 +176,10 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 		// timeout diagnostic, but do not announce or instrument an attempt that
 		// will inherit an already-dead context.
 		if context.Cause(ctx) != nil {
-			return nil, err
+			return result, err
 		}
 		if i == len(candidates)-1 {
-			return nil, err
+			return result, err
 		}
 		if a.quotaSwitch && IsQuotaExhaustionError(err) {
 			next := candidates[i+1]
@@ -189,7 +198,7 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 			emitAgentFallback(opts, current.Name(), next.Name(), err)
 			continue
 		}
-		return nil, err
+		return result, err
 	}
 	return nil, lastErr
 }

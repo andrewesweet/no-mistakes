@@ -268,7 +268,8 @@ type Result struct {
 	// when the adapter reports one. Callers persist it to resume later.
 	SessionID string
 	// Resumed reports whether this invocation resumed opts.Session.ID.
-	Resumed bool
+	Resumed         bool
+	ResumeAttempted *bool
 	// Model is the model the adapter reported serving this invocation, when
 	// available. Instrumentation records it, and eval replay validates it
 	// against the requested candidate.

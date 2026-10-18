@@ -573,48 +573,51 @@ func TestResolveProvider_BuiltInMappingOnly(t *testing.T) {
 }
 
 func TestLane_CodexReadsTheCodexHomeAccount(t *testing.T) {
-	if got := Lane(types.AgentCodex, ""); got != "codex-home" {
+	if got := Lane(types.AgentCodex, "", "codex"); got != "codex-home" {
 		t.Fatalf("codex lane = %q, want codex-home", got)
 	}
 }
 
-func TestLane_PiReadsTheModelPrefixAccount(t *testing.T) {
-	if got := Lane(types.AgentPi, "openai-codex-work/gpt-5.4"); got != "openai-codex-work" {
+func TestLane_PiCodexReadsTheModelPrefixAccount(t *testing.T) {
+	if got := Lane(types.AgentPi, "openai-codex-work/gpt-5.4", "codex"); got != "openai-codex-work" {
 		t.Fatalf("pi lane = %q, want openai-codex-work", got)
 	}
-	if got := Lane(types.AgentPi, "codex-native/gpt-5.4"); got != "codex-home" {
+	if got := Lane(types.AgentPi, "codex-native/gpt-5.4", "codex"); got != "codex-home" {
 		t.Fatalf("pi lane = %q, want codex-home for the codex-native adapter", got)
 	}
-	if got := Lane(types.AgentPi, "gpt-5.4"); got != "" {
+	if got := Lane(types.AgentPi, "gpt-5.4", "codex"); got != "" {
 		t.Fatalf("pi lane = %q, want empty without a model prefix", got)
 	}
 }
 
 func TestLane_OtherAgentsUseTheDefaultRow(t *testing.T) {
-	if got := Lane(types.AgentClaude, "org/fable"); got != "" {
+	if got := Lane(types.AgentClaude, "org/fable", "claude"); got != "" {
 		t.Fatalf("claude lane = %q, want empty (the default row)", got)
 	}
 }
 
 func TestSelectClaudeOpusIncludesLegacyAndFamilyScopes(t *testing.T) {
 	for _, scope := range []string{"seven_day_opus", "model:opus"} {
-		for _, model := range []string{"opus", "claude-opus-4-8", "anthropic/claude-opus-4-8", "sonnet", "claude-sonnet-4-8", ""} {
-			t.Run(scope+"/"+model, func(t *testing.T) {
-				snapshot := fixtureSnapshot(t, 5,
-					claudeProvider(t, `[`+knownRow("all_models", 80, throughReset(), 3)+`,`+knownRow(scope, 0, exhaustedNow(), 0)+`]`),
-					`{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[`+knownRow("all_models", 80, throughReset(), 2)+`]}}`)
-				selection := Select(snapshot, []Candidate{{Agent: types.AgentClaude, Model: model}, {Agent: types.AgentCodex}}, defaultExpectedRunLength)
-				opus := model == "opus" || strings.Contains(model, "claude-opus-")
-				want := types.AgentClaude
-				if opus {
-					want = types.AgentCodex
-				}
+		for _, tc := range []struct {
+			model    string
+			eligible bool
+			choice   types.AgentName
+		}{
+			{"opus", false, types.AgentCodex}, {"opus[1m]", false, types.AgentCodex},
+			{"claude-opus-4-8", false, types.AgentCodex}, {"claude-opus-4-8[1m]", false, types.AgentCodex},
+			{"anthropic/claude-opus-4-8[1m]", false, types.AgentCodex},
+			{"sonnet", true, types.AgentClaude}, {"sonnet[1m]", true, types.AgentClaude},
+			{"claude-sonnet-4-8", true, types.AgentClaude}, {"", true, types.AgentClaude},
+		} {
+			t.Run(scope+"/"+tc.model, func(t *testing.T) {
+				snapshot := fixtureSnapshot(t, 5, claudeProvider(t, `[`+knownRow("all_models", 80, throughReset(), 3)+`,`+knownRow(scope, 0, exhaustedNow(), 0)+`]`), `{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[`+knownRow("all_models", 80, throughReset(), 2)+`]}}`)
+				selection := Select(snapshot, []Candidate{{Agent: types.AgentClaude, Model: tc.model}, {Agent: types.AgentCodex}}, defaultExpectedRunLength)
 				evidence := selection.EvidenceFor(types.AgentClaude)
-				if selection.Choice != want || evidence.Eligible == opus {
-					t.Fatalf("selection=%+v evidence=%+v want choice %s", selection, evidence, want)
+				if selection.Choice != tc.choice || evidence.Eligible != tc.eligible {
+					t.Fatalf("selection=%+v evidence=%+v want choice=%s eligible=%v", selection, evidence, tc.choice, tc.eligible)
 				}
-				if opus && evidence.Scope != scope {
-					t.Fatalf("source scope = %s, want %s", evidence.Scope, scope)
+				if !tc.eligible && evidence.Scope != scope {
+					t.Fatalf("source scope=%s want=%s", evidence.Scope, scope)
 				}
 			})
 		}
@@ -622,22 +625,26 @@ func TestSelectClaudeOpusIncludesLegacyAndFamilyScopes(t *testing.T) {
 }
 
 func TestSelectBindsMergedCredentialMembership(t *testing.T) {
-	for _, candidate := range []Candidate{
-		{Agent: types.AgentCodex},
-		{Agent: types.AgentPi, Provider: "codex", Model: "codex-native/gpt-5.4"},
-		{Agent: types.AgentPi, Provider: "codex", Model: "openai-codex-work/gpt-5.4"},
-		{Agent: types.AgentOpenCode, Provider: "codex"},
-	} {
-		t.Run(string(candidate.Agent)+candidate.Model, func(t *testing.T) {
-			snapshot := fixtureSnapshot(t, 6,
-				`{"provider":"codex","accountKey":"work","accountKeys":["work","codex-home","openai-codex-work","default"],"quotaSemantics":{"status":"known","effectiveAvailability":[`+knownRow("all_models", 0, exhaustedNow(), 0)+`]}}`,
+	for _, schema := range []int{5, 6} {
+		own := ""
+		if schema == 6 {
+			own = `"accountKey":"work",`
+		}
+		for _, candidate := range []Candidate{
+			{Agent: types.AgentCodex},
+			{Agent: types.AgentPi, Provider: "codex", Model: "codex-native/gpt-5.4"},
+			{Agent: types.AgentPi, Provider: "codex", Model: "openai-codex-work/gpt-5.4"},
+			{Agent: types.AgentOpenCode, Provider: "codex"},
+		} {
+			snapshot := fixtureSnapshot(t, schema,
+				`{"provider":"codex",`+own+`"accountKeys":["work","codex-home","openai-codex-work","default"],"quotaSemantics":{"status":"known","effectiveAvailability":[`+knownRow("all_models", 0, exhaustedNow(), 0)+`]}}`,
 				`{"provider":"claude","accountKey":"default","quotaSemantics":{"status":"known","effectiveAvailability":[`+knownRow("all_models", 80, throughReset(), 2)+`]}}`)
 			selection := Select(snapshot, []Candidate{candidate, {Agent: types.AgentClaude}}, defaultExpectedRunLength)
 			evidence := selection.EvidenceFor(candidate.Agent)
 			if selection.Choice != types.AgentClaude || evidence.Eligible || evidence.Account != "work" {
-				t.Fatalf("selection=%+v evidence=%+v, want exhausted merged work account", selection, evidence)
+				t.Fatalf("schema=%d candidate=%+v selection=%+v evidence=%+v, want exhausted merged work account", schema, candidate, selection, evidence)
 			}
-		})
+		}
 	}
 }
 
@@ -661,9 +668,11 @@ func TestSelectClaudeUsesTheSelectedProfileRatherThanADefaultSibling(t *testing.
 }
 
 func TestParseSnapshotRejectsOverlappingCredentialMembership(t *testing.T) {
-	_, err := ParseSnapshot([]byte(`{"schemaVersion":6,"providers":[{"provider":"codex","accountKey":"work","accountKeys":["work","codex-home"]},{"provider":"codex","accountKey":"codex-home"}]}`))
-	if err == nil {
-		t.Fatal("overlapping accounts must not select whichever row happens to appear first")
+	for _, schema := range []int{5, 6} {
+		data := `{"schemaVersion":` + itoa(schema) + `,"providers":[{"provider":"codex","accountKey":"work","accountKeys":["work","codex-home"]},{"provider":"codex","accountKey":"codex-home","accountKeys":["codex-home"]}]}`
+		if _, err := ParseSnapshot([]byte(data)); err == nil {
+			t.Fatalf("schema=%d: overlapping accounts must not select whichever row happens to appear first", schema)
+		}
 	}
 }
 
@@ -733,5 +742,84 @@ func TestSelectReasonDistinguishesEligibilityReorderingFromConfiguredOrder(t *te
 				t.Fatalf("reason does not explain eligibility reordering: %q", result.Reason)
 			}
 		})
+	}
+}
+
+func TestSelectUsesPublishedCredentialMembershipInBothSchemas(t *testing.T) {
+	for _, schema := range []int{5, 6} {
+		own := ""
+		if schema == 6 {
+			own = `"accountKey":"work",`
+		}
+		snapshot := fixtureSnapshot(t, schema, `{"provider":"codex",`+own+`"accountKeys":["work","openai-codex-work"],"quotaSemantics":{"status":"known","effectiveAvailability":[`+knownRow("all_models", 0, exhaustedNow(), 0)+`]}}`)
+		for _, tc := range []struct {
+			model    string
+			eligible bool
+			account  string
+		}{
+			{"openai-codex-work/gpt-5.4", false, "work"},
+			{"missing/gpt-5.4", true, ""},
+			{"codex-native/gpt-5.4", true, ""},
+		} {
+			selection := Select(snapshot, []Candidate{{Agent: types.AgentPi, Provider: "codex", Model: tc.model}}, defaultExpectedRunLength)
+			evidence := selection.EvidenceFor(types.AgentPi)
+			if evidence.Eligible != tc.eligible || evidence.Account != tc.account || evidence.Rankable {
+				t.Fatalf("schema=%d model=%s evidence=%+v", schema, tc.model, evidence)
+			}
+		}
+	}
+}
+
+func TestSelectDefaultProviderQuotaDoesNotDependOnOtherAccountExpansion(t *testing.T) {
+	for _, tc := range []struct{ provider, model string }{
+		{"kimi", "kimi-coding/kimi-for-coding"},
+		{"grok", "xai/grok-4"},
+		{"openrouter", "openrouter/anthropic/claude-sonnet-4"},
+		{"claude", "anthropic/claude-sonnet-4"},
+	} {
+		for _, schema := range []int{5, 6} {
+			for _, pct := range []float64{0, 80} {
+				own := ""
+				if schema == 6 {
+					own = `"accountKey":"default",`
+				}
+				row := `{"provider":"` + tc.provider + `",` + own + `"accountKeys":["default"],"quotaSemantics":{"status":"known","effectiveAvailability":[` + knownRow("all_models", pct, throughReset(), 3) + `]}}`
+				providers := []string{row}
+				if schema == 6 {
+					providers = append(providers, `{"provider":"codex","accountKey":"codex-home","accountKeys":["codex-home"],"quotaSemantics":{"status":"unknown"}}`, `{"provider":"codex","accountKey":"openai-codex-work","accountKeys":["openai-codex-work"],"quotaSemantics":{"status":"unknown"}}`)
+				}
+				selection := Select(fixtureSnapshot(t, schema, providers...), []Candidate{{Agent: types.AgentPi, Provider: tc.provider, Model: tc.model}}, defaultExpectedRunLength)
+				evidence := selection.EvidenceFor(types.AgentPi)
+				wantEligible := pct > 0
+				if evidence.Eligible != wantEligible || evidence.Rankable != wantEligible || evidence.Account != "default" {
+					t.Fatalf("provider=%s schema=%d percent=%g evidence=%+v", tc.provider, schema, pct, evidence)
+				}
+			}
+		}
+	}
+}
+
+func TestSelectLegacySchema5DoesNotAssumeANamedPiCredential(t *testing.T) {
+	snapshot := fixtureSnapshot(t, 5, `{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[`+knownRow("all_models", 80, throughReset(), 3)+`]}}`)
+	selection := Select(snapshot, []Candidate{{Agent: types.AgentPi, Provider: "codex", Model: "missing/gpt-5.4"}, {Agent: types.AgentCodex}}, defaultExpectedRunLength)
+	if selection.Choice != types.AgentCodex || selection.EvidenceFor(types.AgentPi).Rankable {
+		t.Fatalf("legacy account identity was guessed: %+v", selection)
+	}
+}
+
+func TestSelectClaudeContextSuffixPreservesQuotaScopes(t *testing.T) {
+	for _, tc := range []struct{ model, scope string }{
+		{"opus[1m]", "model:opus"}, {"opus[1m]", "seven_day_opus"},
+		{"sonnet[1m]", "model:sonnet"},
+		{"claude-sonnet-4-6[1m]", "model:sonnet"},
+		{"claude-opus-4-6[1m]", "model:claude-opus-4-6"},
+		{"anthropic/claude-sonnet-4-6[1m]", "model:claude-sonnet-4-6"},
+	} {
+		snapshot := fixtureSnapshot(t, 5, claudeProvider(t, `[`+knownRow("all_models", 80, throughReset(), 3)+`,`+knownRow(tc.scope, 0, exhaustedNow(), 0)+`]`), `{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[`+knownRow("all_models", 80, throughReset(), 2)+`]}}`)
+		selection := Select(snapshot, []Candidate{{Agent: types.AgentClaude, Model: tc.model}, {Agent: types.AgentCodex}}, defaultExpectedRunLength)
+		evidence := selection.EvidenceFor(types.AgentClaude)
+		if selection.Choice != types.AgentCodex || evidence.Eligible || evidence.Scope != tc.scope {
+			t.Fatalf("model=%s scope=%s selection=%+v", tc.model, tc.scope, selection)
+		}
 	}
 }

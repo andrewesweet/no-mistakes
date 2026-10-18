@@ -28,7 +28,7 @@ type Candidate struct {
 type Evidence struct {
 	Agent    types.AgentName `json:"agent"`
 	Provider string          `json:"provider,omitempty"`
-	// Account is the bound quota-axi accountKey (schema 6); empty on schema 5.
+	// Account is the bound quota-axi account key, when published.
 	Account string `json:"account,omitempty"`
 	// Scope is the limiting applicable row; empty when nothing was applicable.
 	Scope string `json:"scope,omitempty"`
@@ -93,24 +93,32 @@ func ResolveProvider(agent types.AgentName, declared string) string {
 
 // Lane returns the quota-axi account key a candidate binds to, mirroring
 // firstmate's quota_lane: native codex reads the codex-home account, a Pi
-// agent reads the account named by its model's prefix (with codex-native
-// folding to codex-home), and everything else reads the default row.
-func Lane(agent types.AgentName, model string) string {
-	switch agent {
-	case types.AgentCodex:
+// agent can name a Codex credential or Claude profile with its model prefix;
+// other providers use the default row.
+func Lane(agent types.AgentName, model, provider string) string {
+	provider = ResolveProvider(agent, provider)
+	if agent == types.AgentCodex && provider == "codex" {
 		return "codex-home"
-	case types.AgentPi:
-		if !strings.Contains(model, "/") {
-			return ""
-		}
-		prefix, _, _ := strings.Cut(model, "/")
+	}
+	if agent != types.AgentPi {
+		return ""
+	}
+	prefix, _, qualified := strings.Cut(model, "/")
+	if !qualified {
+		return ""
+	}
+	switch provider {
+	case "codex":
 		if prefix == "codex-native" {
 			return "codex-home"
 		}
 		return prefix
-	default:
-		return ""
+	case "claude":
+		if strings.HasPrefix(prefix, "profile:") || strings.HasPrefix(prefix, "claude-swap:") {
+			return prefix
+		}
 	}
+	return ""
 }
 
 // Select orders candidates by quota evidence. It never fails and never
@@ -221,8 +229,9 @@ func evaluate(snapshot *Snapshot, candidate Candidate, expectedRunLength time.Du
 		evidence.Reason = "provider " + candidate.Provider + " is not in the quota snapshot"
 		return evidence
 	}
-	if snapshot.SchemaVersion == 6 {
-		evidence.Account = row.AccountKey
+	evidence.Account = row.AccountKey
+	if evidence.Account == "" && len(row.AccountKeys) > 0 {
+		evidence.Account = row.AccountKeys[0]
 	}
 	if row.QuotaSemantics.Status != "known" && row.QuotaSemantics.Status != "partial" {
 		evidence.Reason = "provider " + candidate.Provider + " quota is unmeasured (" + row.QuotaSemantics.Status + ")"
@@ -309,20 +318,20 @@ func evaluate(snapshot *Snapshot, candidate Candidate, expectedRunLength time.Du
 	return evidence
 }
 
-// bindRow finds the one provider row a candidate binds to: the lane's account
-// row on schema 6 (the default account when no lane is named), the provider's row
-// on schema 5. It reports false when no account matches.
+// bindRow finds the provider row covering the candidate's credential, or the
+// default account when no credential is named. It reports false when no account
+// matches.
 func bindRow(snapshot *Snapshot, candidate Candidate) (*Provider, bool) {
 	var fallback *Provider
+	lane := Lane(candidate.Agent, candidate.Model, candidate.Provider)
 	for i := range snapshot.Providers {
 		row := &snapshot.Providers[i]
 		if row.Provider != candidate.Provider {
 			continue
 		}
-		if snapshot.SchemaVersion != 6 {
+		if snapshot.SchemaVersion == 5 && row.AccountKey == "" && len(row.AccountKeys) == 0 && (lane == "" || candidate.Agent != types.AgentPi) {
 			return row, true
 		}
-		lane := Lane(candidate.Agent, candidate.Model)
 		if lane != "" && (row.AccountKey == lane || slices.Contains(row.AccountKeys, lane)) {
 			return row, true
 		}
@@ -333,7 +342,7 @@ func bindRow(snapshot *Snapshot, candidate Candidate) (*Provider, bool) {
 			fallback = row
 		}
 	}
-	if snapshot.SchemaVersion == 6 && fallback != nil {
+	if fallback != nil {
 		return fallback, true
 	}
 	return nil, false
@@ -346,6 +355,9 @@ func applicableRows(row *Provider, model string) []EffectiveAvailability {
 	bare := model
 	if i := strings.LastIndex(bare, "/"); i >= 0 {
 		bare = bare[i+1:]
+	}
+	if row.Provider == "claude" {
+		bare = strings.TrimSuffix(bare, "[1m]")
 	}
 	var rows []EffectiveAvailability
 	for _, r := range row.QuotaSemantics.EffectiveAvailability {

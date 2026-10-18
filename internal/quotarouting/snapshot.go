@@ -91,22 +91,24 @@ func ParseSnapshot(data []byte) (*Snapshot, error) {
 		if strings.TrimSpace(provider.Provider) == "" {
 			return nil, fmt.Errorf("quota-axi snapshot has a provider row without a provider label")
 		}
-		if snapshot.SchemaVersion == 6 {
-			if strings.TrimSpace(provider.AccountKey) == "" {
-				return nil, fmt.Errorf("provider %s has no accountKey in a schema-6 snapshot", provider.Provider)
+		if snapshot.SchemaVersion == 6 && strings.TrimSpace(provider.AccountKey) == "" {
+			return nil, fmt.Errorf("provider %s has no accountKey in a schema-6 snapshot", provider.Provider)
+		}
+		keys := provider.AccountKeys
+		if provider.AccountKey != "" {
+			keys = append([]string{provider.AccountKey}, keys...)
+		}
+		rowKeys := map[string]bool{}
+		for _, account := range keys {
+			if rowKeys[account] {
+				continue
 			}
-			rowKeys := map[string]bool{}
-			for _, account := range append([]string{provider.AccountKey}, provider.AccountKeys...) {
-				if rowKeys[account] {
-					continue
-				}
-				rowKeys[account] = true
-				key := provider.Provider + "\x00" + account
-				if seen[key] {
-					return nil, fmt.Errorf("provider %s repeats accountKey %s", provider.Provider, account)
-				}
-				seen[key] = true
+			rowKeys[account] = true
+			key := provider.Provider + "\x00" + account
+			if seen[key] {
+				return nil, fmt.Errorf("provider %s repeats accountKey %s", provider.Provider, account)
 			}
+			seen[key] = true
 		}
 	}
 	return &snapshot, nil
