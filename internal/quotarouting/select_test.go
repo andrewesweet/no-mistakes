@@ -954,3 +954,115 @@ func TestSelectCodexKeepsAccountBoundsWithoutAMatchingModelScope(t *testing.T) {
 		}
 	}
 }
+
+func TestSelectProviderSubscriptionScopesApplyToDeclaredAgents(t *testing.T) {
+	for _, provider := range []struct {
+		agent                  types.AgentName
+		provider, scope, model string
+	}{
+		{types.AgentDevin, "devin", "included_quota", ""},
+		{types.AgentName("acp:devin"), "devin", "included_quota", ""},
+		{types.AgentPi, "commandcode", "included_credits", "commandcode/claude-sonnet-4-6"},
+		{types.AgentPi, "higgsfield", "included_credits", ""},
+		{types.AgentPi, "elevenlabs", "included_characters", ""},
+		{types.AgentPi, "agy", "gemini", "google-antigravity/gemini-3-pro"},
+		{types.AgentPi, "agy", "claude_gpt", "google-antigravity/claude-sonnet-4-6"},
+	} {
+		for _, tc := range []struct {
+			name               string
+			row                string
+			eligible, rankable bool
+			choice             int
+			priority           float64
+		}{
+			{"headroom", knownRow(provider.scope, 80, throughReset(), 4), true, true, 0, 4},
+			{"stable tie", knownRow(provider.scope, 80, throughReset(), 1), true, true, 0, 1},
+			{"exhausted now", knownRow(provider.scope, 0, exhaustedNow(), -5), false, false, 1, 0},
+			{"zero remaining", knownRow(provider.scope, 0, unknownRunway(), -5), false, false, 1, 0},
+			{"short runway", knownRow(provider.scope, 40, projectedExhaustion(600), 4), false, false, 1, 0},
+			{"long runway", knownRow(provider.scope, 40, projectedExhaustion(7200), 4), true, true, 0, 4},
+			{"unknown", `{"scope":"` + provider.scope + `","status":"unknown","runway":{"status":"unknown"},"selection":{"status":"unknown"}}`, true, false, 1, 0},
+		} {
+			t.Run(string(provider.agent)+"/"+provider.provider+"/"+provider.scope+"/"+tc.name, func(t *testing.T) {
+				for _, schema := range []int{5, 6} {
+					own := ""
+					if schema == 6 {
+						own = `"accountKey":"default",`
+					}
+					snapshot := fixtureSnapshot(t, schema,
+						`{"provider":"`+provider.provider+`",`+own+`"accountKeys":["default"],"quotaSemantics":{"status":"known","effectiveAvailability":[`+tc.row+`]}}`,
+						`{"provider":"codex","accountKey":"codex-home","accountKeys":["codex-home"],"quotaSemantics":{"status":"known","effectiveAvailability":[`+knownRow("all_models", 70, throughReset(), 1)+`]}}`)
+					candidates := []Candidate{{Agent: provider.agent, Provider: provider.provider, Model: provider.model}, {Agent: types.AgentCodex}}
+					selection := Select(snapshot, candidates, defaultExpectedRunLength)
+					evidence := selection.EvidenceFor(provider.agent)
+					if selection.Choice != candidates[tc.choice].Agent || evidence.Eligible != tc.eligible || evidence.Rankable != tc.rankable || evidence.Scope != provider.scope || evidence.Account != "default" {
+						t.Fatalf("schema=%d selection=%+v", schema, selection)
+					}
+					if tc.rankable && (evidence.SpendPriority == nil || *evidence.SpendPriority != tc.priority) {
+						t.Fatalf("wrong priority: %+v", evidence)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestSelectAntigravityModelGroupsStayIndependent(t *testing.T) {
+	for _, tc := range []struct{ model, scope string }{
+		{"gemini-3-pro", "gemini"},
+		{"google-antigravity/gemini-3-pro", "gemini"},
+		{"claude-sonnet-4-6", "claude_gpt"},
+		{"google-antigravity/gpt-oss-120b", "claude_gpt"},
+	} {
+		for _, exhausted := range []bool{false, true} {
+			var rows []string
+			for _, scope := range []string{"gemini", "claude_gpt"} {
+				pct := float64(80)
+				runway := throughReset()
+				if (scope == tc.scope) == exhausted {
+					pct = 0
+					runway = exhaustedNow()
+				}
+				rows = append(rows, knownRow(scope, pct, runway, 4))
+			}
+			snapshot := fixtureSnapshot(t, 5, `{"provider":"agy","accountKeys":["default"],"quotaSemantics":{"status":"known","effectiveAvailability":[`+strings.Join(rows, ",")+`]}}`)
+			selection := Select(snapshot, []Candidate{{Agent: types.AgentPi, Provider: "agy", Model: tc.model}, {Agent: types.AgentOpenCode}}, defaultExpectedRunLength)
+			evidence := selection.EvidenceFor(types.AgentPi)
+			want := types.AgentPi
+			if exhausted {
+				want = types.AgentOpenCode
+			}
+			if selection.Choice != want || evidence.Eligible == exhausted || evidence.Rankable == exhausted || evidence.Scope != tc.scope {
+				t.Fatalf("model=%s exhausted=%v selection=%+v", tc.model, exhausted, selection)
+			}
+		}
+	}
+}
+
+func TestSelectAntigravityWithoutAModelIncludesBothReportedGroups(t *testing.T) {
+	for _, schema := range []int{5, 6} {
+		for _, exhausted := range []bool{false, true} {
+			pct := float64(80)
+			runway := throughReset()
+			want := types.AgentAntigravity
+			if exhausted {
+				pct = 0
+				runway = exhaustedNow()
+				want = types.AgentOpenCode
+			}
+			own := ""
+			if schema == 6 {
+				own = `"accountKey":"default",`
+			}
+			snapshot := fixtureSnapshot(t, schema, `{"provider":"agy",`+own+`"accountKeys":["default"],"quotaSemantics":{"status":"known","effectiveAvailability":[`+knownRow("gemini", pct, runway, 4)+`,`+knownRow("claude_gpt", pct, runway, 2)+`]}}`)
+			selection := Select(snapshot, []Candidate{{Agent: types.AgentAntigravity, Provider: "agy"}, {Agent: types.AgentOpenCode}}, defaultExpectedRunLength)
+			evidence := selection.EvidenceFor(types.AgentAntigravity)
+			if selection.Choice != want || evidence.Eligible == exhausted || evidence.Rankable == exhausted {
+				t.Fatalf("schema=%d exhausted=%v selection=%+v", schema, exhausted, selection)
+			}
+			if !exhausted && (evidence.Scope != "claude_gpt" || evidence.SpendPriority == nil || *evidence.SpendPriority != 2) {
+				t.Fatalf("missing limiting group: %+v", evidence)
+			}
+		}
+	}
+}

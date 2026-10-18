@@ -363,6 +363,15 @@ func applicableRows(row *Provider, model string) []EffectiveAvailability {
 	if row.Provider == "claude" {
 		bare = strings.TrimSuffix(bare, "[1m]")
 	}
+	agyScope := ""
+	if row.Provider == "agy" {
+		switch {
+		case strings.HasPrefix(bare, "gemini-"):
+			agyScope = "gemini"
+		case strings.HasPrefix(bare, "claude-"), strings.HasPrefix(bare, "gpt-"):
+			agyScope = "claude_gpt"
+		}
+	}
 	var rows []EffectiveAvailability
 	for _, r := range row.QuotaSemantics.EffectiveAvailability {
 		scope := r.Scope
@@ -375,6 +384,12 @@ func applicableRows(row *Provider, model string) []EffectiveAvailability {
 		modelScope, scopedModel := strings.CutPrefix(scope, "model:")
 		switch {
 		case scope == "all_models" || scope == "all_products":
+			rows = append(rows, r)
+		case row.Provider == "devin" && scope == "included_quota",
+			(row.Provider == "commandcode" || row.Provider == "higgsfield") && scope == "included_credits",
+			row.Provider == "elevenlabs" && scope == "included_characters":
+			rows = append(rows, r)
+		case row.Provider == "agy" && (scope == "gemini" || scope == "claude_gpt") && (model == "" || scope == agyScope):
 			rows = append(rows, r)
 		case model != "" && scope == "model:"+bare:
 			rows = append(rows, r)
