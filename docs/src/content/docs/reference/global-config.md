@@ -162,7 +162,7 @@ You can also set an ordered fallback list:
 agent: [codex, grok]
 ```
 
-The list is filtered to entries available to the daemon at run startup, and the first available entry becomes the primary agent.
+The list is filtered to entries available to the daemon at run startup. By default, the first available entry becomes the primary agent; opt-in [quota-aware routing](#quota_routing) can reorder that resolved list.
 After resolving `auto`, entries that resolve to the same ACP target are deduplicated in list order, so `cursor` and `acp:cursor` (or `devin` and `acp:devin`) provide one fallback and preserve whichever spelling appears first.
 If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
@@ -248,7 +248,7 @@ Model and reasoning effort per agent, in one common spelling. no-mistakes maps e
 
 |         |                                                                                     |
 | ------- | ----------------------------------------------------------------------------------- |
-| Type    | `map[string]{model, effort}`                                                        |
+| Type    | `map[string]{model, effort, quota_provider}`                                         |
 | Keys    | `claude`, `codex`, `grok`, `rovodev`, `opencode`, `pi`, `copilot`, `antigravity`, `cursor`, `devin`, `acp:<target>` |
 | Default | Empty (every harness keeps its own defaults)                                        |
 
@@ -287,9 +287,9 @@ OpenCode 2 receives both knobs in the model reference when the session is create
 OpenCode 1 receives them in the session message.
 Neither version receives model flags in the launch command, because `opencode serve` rejects them.
 
-An entry may also declare `quota_provider`: the quota-axi provider id [quota-aware routing](#quota_routing) reads this agent's evidence from. It is routing input, never a harness knob, and is read only when `quota_routing.enabled` is on. `claude` and `codex` never need it; `pi` always requires an explicit `quota_provider`. Account selection follows the provider-specific rules under [quota-aware routing](#quota_routing). A `pi` without `quota_provider` disables reordering for the run.
+An entry may also declare `quota_provider`, the quota-axi provider ID used as routing input when `quota_routing.enabled` is on. It does not set a harness option. See [quota-aware routing](#quota_routing) for provider defaults, Pi's explicit-provider requirement, and account selection.
 
-`rovodev` and `antigravity` have no mechanism no-mistakes can set - `acli rovodev serve` plus its REST session API take no model parameter, and the `agy` CLI parses flags strictly - so `agent_config` for them is a config error rather than a request that quietly does nothing. Reach for [`agent_args_override`](#agent_args_override) there if your build of the CLI accepts a flag. Reasoning effort is likewise unavailable for ACP targets: no-mistakes drives them through `acpx`, which exposes `--model` but no effort surface. acpx also accepts only the model ids a target advertises over ACP; for `devin` that is a subset of `devin models list`, and [`acp_registry_overrides`](#acp_registry_overrides) is the escape hatch for the rest.
+`rovodev` and `antigravity` have no mechanism no-mistakes can set - `acli rovodev serve` plus its REST session API take no model parameter, and the `agy` CLI parses flags strictly - so setting `model` or `effort` for them is a config error. An entry containing only `quota_provider` is valid. Reach for [`agent_args_override`](#agent_args_override) there if your build of the CLI accepts a flag. Reasoning effort is likewise unavailable for ACP targets: no-mistakes drives them through `acpx`, which exposes `--model` but no effort surface. acpx also accepts only the model ids a target advertises over ACP; for `devin` that is a subset of `devin models list`, and [`acp_registry_overrides`](#acp_registry_overrides) is the escape hatch for the rest.
 
 `agent_config` is global-only. Like `agent_args_override`, it decides which model runs with your credentials, so an `agent_config` block in a repository's `.no-mistakes.yaml` is ignored. For first-class ACP aliases, `cursor` and `acp:cursor` share a profile, as do `devin` and `acp:devin`: the selected spelling's entry wins when both are configured; otherwise the other spelling's entry applies. This also applies to review-agent profiles.
 
@@ -855,30 +855,30 @@ Opt-in, quota-aware agent ordering at run start.
 | Type    | `map[string]{enabled, expected_run_length, read_timeout, quota_axi_path}` |
 | Default | `enabled: false` (the feature is opt-in) |
 
-When `enabled: true`, no-mistakes reads **one** snapshot from the locally installed `quota-axi` tool at the start of each run and reorders the resolved agent list by quota evidence before the run picks its head agent:
+When `enabled: true`, no-mistakes reads **one** snapshot with the locally installed `quota-axi --full --json` at the start of each run and reorders the resolved agent list by quota evidence before the run picks its head agent. Explicit [`review_agents`](#review_agents) overrides do not use quota routing. Ordering follows these rules:
 
 - An agent with concrete proof of exhaustion - runway `exhausted_now`, or a known `0%` remaining - is moved to the back of the list (it stays in the list, so the existing launch-failure fallback still has somewhere to go).
-- An agent whose runway is `projected_exhaustion` stays rankable only when the projected usable runway exceeds `expected_run_length`; otherwise it is treated like an exhausted one.
+- An agent whose runway is `projected_exhaustion` must have a reported usable runway greater than `expected_run_length`; otherwise it is treated like an exhausted one.
 - Runway `through_reset` passes.
-- Surviving agents rank by quota-axi's own `spendPriority` (the minimum across the scopes that apply to the agent's configured model); ties keep your configured order.
-- An agent with no readable quota evidence - its provider is unmeasured, or no provider mapping exists for it - stays eligible but ranks below every measured one.
+- Surviving agents with known applicable scopes and a `spendPriority` for each scope rank by the minimum of those priorities, highest first; ties keep your configured order.
+- An agent without proof of exhaustion whose applicable quota or `spendPriority` is unknown stays eligible but ranks below every ranked agent. Unknown candidates keep their configured order relative to each other.
 
 Native `claude` and `codex` retain account, profile, and model-scope matching. All other agents, including Pi, use only provider-level `all_models` or `all_products` scopes for their declared provider. Vendor-specific and named-model scopes do not affect their routing. Without provider-wide evidence, quota is unknown: the agent stays eligible and retains its configured order among unknown candidates.
 
-Each agent keeps its own [`agent_config`](#agent_config) model and effort: only the order changes. A missing, slow, or unreadable `quota-axi` keeps your configured order, logs the reason, and never blocks a run; nothing is sent anywhere - the snapshot is read from your local `quota-axi` and the outcome is recorded on the local run only (`no-mistakes axi status`, `no-mistakes stats`, and `no-mistakes stats --run RUN_ID` show the candidates, the evidence, and the choice).
+Each agent keeps its own [`agent_config`](#agent_config) model and effort: only the order changes. A missing, slow, or unreadable `quota-axi` keeps your configured order, logs the reason, and never blocks a run. The mid-run quota switch remains enabled in this case. Inspect the recorded outcome with `no-mistakes axi status` or [`no-mistakes stats`](/no-mistakes/reference/cli/#no-mistakes-stats). See [local telemetry](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine) for storage and privacy.
 
-Mid-run, a recognised quota error on the active agent moves the run **once** to the next agent in the chosen order, with a fresh session (any resumed session is dropped), and it never moves back. The existing agent-unavailable fallback is unchanged.
+Mid-run, a recognised quota-exhaustion error advances to the next agent in the chosen order with a fresh session, dropping any resumed session. This can happen once per agent, and later invocations do not return to earlier agents. If no successor remains, the error is returned. The existing agent-unavailable fallback is unchanged. Daemon recovery reuses the recorded order and last recorded switch without reading another snapshot, even if the global opt-in setting has since changed.
 
 Subkeys:
 
 - `enabled` (bool, default `false`): the opt-in switch.
-- `expected_run_length` (duration, default `90m`): the runway floor. A projected exhaustion that outlasts this window does not demote the agent; the value is an expectation for ordering, never a run cancel.
-- `read_timeout` (duration, default `15s`): bound on the single quota-axi read at run start. Quota-axi may delegate an expired session's renewal to the vendor CLI that owns it, so a slow read waits up to this long before the run proceeds on the configured order.
+- `expected_run_length` (positive duration, default `90m`): the runway floor. A projected exhaustion that outlasts this window does not demote the agent; the value is an expectation for ordering, never a run cancel.
+- `read_timeout` (positive duration, default `15s`): bound on the single quota-axi read at run start. Quota-axi may delegate an expired session's renewal to the vendor CLI that owns it, so a slow read waits up to this long before the run proceeds on the configured order.
 - `quota_axi_path` (string, default `quota-axi` on `PATH`): the executable to run.
 
 `quota_routing` is global-only: it decides which of this machine's credential-bearing agents a run spends, so a `quota_routing` block in a repository's `.no-mistakes.yaml` is a config error rather than an ignored key.
 
-Provider mapping: `claude` and `codex` map to their quota-axi providers automatically. Other agents can declare [`quota_provider`](#agent_config) under `agent_config`. An unmapped non-Pi agent ranks as unknown quota. A `pi` without an explicit provider disables reordering for the whole run with one warning: the configured order stands, the mid-run switch stays off, and the run record says why. Model names never infer a provider. For Pi with `quota_provider: codex`, the model prefix selects the published credential key (`codex-native/…` reads `codex-home`; `openai-codex-work/…` reads that Pi credential). For `quota_provider: claude`, explicit `profile:…` and `claude-swap:…` prefixes select that published profile. Other providers use their default account; a Pi provider prefix such as `kimi-coding` is not an account key. Routing checks published `accountKeys` membership in both quota schemas. A named credential missing from the report stays unknown rather than borrowing another account’s evidence.
+Provider mapping: `claude` and `codex` map to their same-named quota-axi providers by default. Any agent can declare [`quota_provider`](#agent_config) under `agent_config` to select a provider explicitly. An unmapped non-Pi agent ranks as unknown quota. A `pi` without an explicit provider disables reordering for the whole run with one warning: the configured order stands, the mid-run switch stays off, and the run record says why. Model names never infer a provider. For Pi with `quota_provider: codex`, the model prefix selects the published credential key (`codex-native/…` reads `codex-home`; `openai-codex-work/…` reads that Pi credential). For `quota_provider: claude`, explicit `profile:…` and `claude-swap:…` prefixes select that published profile. Other providers use their default account; a Pi provider prefix such as `kimi-coding` is not an account key. Routing checks published `accountKeys` membership in both quota schemas. A named credential missing from the report stays unknown rather than borrowing another account’s evidence.
 
 ### worktree_roots
 
