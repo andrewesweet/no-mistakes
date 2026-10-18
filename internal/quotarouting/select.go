@@ -169,11 +169,14 @@ func Select(snapshot *Snapshot, candidates []Candidate, expectedRunLength time.D
 	for _, i := range append(append(ranked, unranked...), ineligible...) {
 		order = append(order, candidates[i].Agent)
 	}
+	configuredOrder := slices.Equal(selection.Order, order)
 	selection.Order = order
 	selection.Choice = order[0]
 
 	rankedCount := len(ranked)
 	switch {
+	case rankedCount == 0 && !configuredOrder:
+		selection.Reason = "reordered by quota eligibility; no rankable quota evidence"
 	case rankedCount == 0:
 		selection.Reason = "no rankable quota evidence: configured order"
 	case rankedCount == len(candidates):

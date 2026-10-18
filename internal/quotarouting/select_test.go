@@ -3,6 +3,7 @@ package quotarouting
 import (
 	"encoding/json"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -692,5 +693,45 @@ func TestSelectClaudeFamilyScopesApplyToVersionedModels(t *testing.T) {
 		if evidence.Eligible || evidence.Scope != "model:"+family {
 			t.Fatalf("family=%s evidence=%+v", family, evidence)
 		}
+	}
+}
+
+func TestSelectReasonDistinguishesEligibilityReorderingFromConfiguredOrder(t *testing.T) {
+	snapshot := fixtureSnapshot(t, 5,
+		`{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0}]}}`,
+		`{"provider":"claude","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0}]}}`)
+	for _, tc := range []struct {
+		name             string
+		configured, want []types.AgentName
+		reordered        bool
+	}{
+		{"unknown replaces exhausted head", []types.AgentName{types.AgentCodex, types.AgentOpenCode}, []types.AgentName{types.AgentOpenCode, types.AgentCodex}, true},
+		{"unknown already first", []types.AgentName{types.AgentOpenCode, types.AgentCodex}, []types.AgentName{types.AgentOpenCode, types.AgentCodex}, false},
+		{"head unchanged but later candidate moves", []types.AgentName{types.AgentOpenCode, types.AgentCodex, types.AgentGrok}, []types.AgentName{types.AgentOpenCode, types.AgentGrok, types.AgentCodex}, true},
+		{"unknown candidates already before exhausted", []types.AgentName{types.AgentOpenCode, types.AgentGrok, types.AgentCodex}, []types.AgentName{types.AgentOpenCode, types.AgentGrok, types.AgentCodex}, false},
+		{"all unknown", []types.AgentName{types.AgentOpenCode, types.AgentGrok}, []types.AgentName{types.AgentOpenCode, types.AgentGrok}, false},
+		{"all exhausted", []types.AgentName{types.AgentCodex, types.AgentClaude}, []types.AgentName{types.AgentCodex, types.AgentClaude}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidates := make([]Candidate, 0, len(tc.configured))
+			for _, name := range tc.configured {
+				candidates = append(candidates, Candidate{Agent: name})
+			}
+			result := Select(snapshot, candidates, defaultExpectedRunLength)
+			if !slices.Equal(result.Order, tc.want) || result.Choice != tc.want[0] {
+				t.Fatalf("order=%v choice=%s want=%v", result.Order, result.Choice, tc.want)
+			}
+			for _, evidence := range result.Evidence {
+				if evidence.Rankable {
+					t.Fatalf("fixture unexpectedly rankable: %+v", evidence)
+				}
+			}
+			if strings.Contains(result.Reason, "configured order") == tc.reordered {
+				t.Fatalf("reordered=%v reason=%q", tc.reordered, result.Reason)
+			}
+			if tc.reordered && !strings.Contains(result.Reason, "eligibility") {
+				t.Fatalf("reason does not explain eligibility reordering: %q", result.Reason)
+			}
+		})
 	}
 }
