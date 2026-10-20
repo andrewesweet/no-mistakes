@@ -288,18 +288,17 @@ func renderFindingsRange(f *findings, width int, cursor int, selected map[string
 			pointer = blueStyle.Render(">")
 		}
 
-		// Pre-existing findings open their own group: a header renders where
-		// the group starts (a pre-existing row whose predecessor is not one,
-		// or the first row of the visible window) and each row is tagged, so
-		// the grouping survives scrolling and any interleaving with
-		// introduced findings. Grouping is display-only: cursor and selection
-		// indexing are untouched.
+		// Origin headers mark transitions in both directions and the first
+		// visible pre-existing row. Each pre-existing row is also tagged.
+		// Grouping is display-only: cursor and selection indexing are untouched.
 		preExisting := item.IsPreExisting()
 		if preExisting && (idx == start || !f.Items[idx-1].IsPreExisting()) {
 			if idx > start {
 				b.WriteString("\n")
 			}
 			b.WriteString(dimStyle.Render("── Pre-existing (outside this change) ──") + "\n")
+		} else if !preExisting && idx > start && f.Items[idx-1].IsPreExisting() {
+			b.WriteString("\n" + dimStyle.Render("── Introduced by this change ──") + "\n")
 		}
 
 		// Unfocused severity icons are dim to match description/file ref dimming.

@@ -807,6 +807,9 @@ func recordedFindingsFields(findingsJSON string, full bool) ([]toon.Field, bool)
 	}
 	if len(parsed.Items) > 0 {
 		fields = append(fields, toon.Field{Key: "findings", Value: findingRows(parsed.Items)})
+		if preExisting := preExistingFindingRows(parsed.Items); len(preExisting) > 0 {
+			fields = append(fields, toon.Field{Key: "pre_existing_findings", Value: preExisting})
+		}
 	}
 	return fields, bounded
 }

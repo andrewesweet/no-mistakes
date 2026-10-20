@@ -8,6 +8,33 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestWriteFindingItems_InterleavedOriginsPartitionInBothFormats(t *testing.T) {
+	for name, flavor := range map[string]prBodyFlavor{"markdown": prBodyMarkdown, "html": prBodyHTML} {
+		t.Run(name, func(t *testing.T) {
+			findings := &types.Findings{Items: []types.Finding{
+				{Severity: "warning", Description: "old first", Origin: "pre-existing"},
+				{Severity: "warning", Description: "fresh first"},
+				{Severity: "warning", Description: "old second", Origin: "pre-existing"},
+				{Severity: "warning", Description: "fresh second", Origin: "legacy"},
+			}}
+			var b strings.Builder
+			writeFindingItems(&b, &db.StepResult{StepName: types.StepReview}, findings, flavor)
+			got := b.String()
+			markers := []string{
+				"fresh first", "fresh second", "Pre-existing findings (outside this change)", "old first", "old second",
+			}
+			previous := -1
+			for _, marker := range markers {
+				index := strings.Index(got, marker)
+				if index <= previous || strings.Count(got, marker) != 1 {
+					t.Fatalf("expected each finding once in origin groups, ordered %q:\n%s", markers, got)
+				}
+				previous = index
+			}
+		})
+	}
+}
+
 // The PR body groups pre-existing review findings under their own marker
 // inside the step's findings list, so a PR reader sees which findings the
 // change did not introduce. Bullets render exactly as before otherwise.

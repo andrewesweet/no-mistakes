@@ -1,10 +1,65 @@
 package pipeline
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestMergeFindingsOriginRelabelPreservesIdentityAndSelection(t *testing.T) {
+	for name, merge := range map[string]func(string, string) string{
+		"merge": mergeFindingsJSON,
+		"outstanding": func(existing, current string) string {
+			return mergeOutstandingFindingsJSON(existing, current, []string{"retry.go"})
+		},
+	} {
+		for _, origins := range [][2]string{
+			{types.FindingOriginIntroduced, types.FindingOriginPreExisting},
+			{types.FindingOriginPreExisting, types.FindingOriginIntroduced},
+			{types.FindingOriginPreExisting, ""},
+			{types.FindingOriginPreExisting, "legacy"},
+			{"", types.FindingOriginPreExisting},
+			{"legacy", types.FindingOriginPreExisting},
+		} {
+			for _, line := range []int{42, 57} {
+				t.Run(fmt.Sprintf("%s/%s-to-%s/line-%d", name, origins[0], origins[1], line), func(t *testing.T) {
+					original := types.Finding{
+						ID: "review-1", Severity: "warning", File: "retry.go", Line: 42,
+						Description: "unbounded retry", Action: types.ActionAskUser,
+						UserInstructions: "preserve backoff", Origin: origins[0],
+					}
+					current := original
+					current.ID, current.Line = "review-9", line
+					current.Origin = origins[1]
+					current.Action, current.UserInstructions = types.ActionAutoFix, ""
+					encode := func(f types.Finding) string {
+						t.Helper()
+						raw, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{f}})
+						if err != nil {
+							t.Fatal(err)
+						}
+						return raw
+					}
+					raw := merge(encode(original), encode(current))
+					got, err := types.ParseFindingsJSON(raw)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := original
+					want.Origin = origins[1]
+					if len(got.Items) != 1 || got.Items[0] != want {
+						t.Fatalf("merged findings = %#v, want only %#v", got.Items, want)
+					}
+					selected := retainFindingIDsByIdentity(raw, []string{original.ID}, map[string]types.Finding{original.ID: original})
+					if len(selected) != 1 || selected[0] != original.ID {
+						t.Fatalf("relabel lost recorded selection: %v", selected)
+					}
+				})
+			}
+		}
+	}
+}
 
 // A relabel between the two origin values is the same finding: the reviewer
 // corrects its own earlier judgment about whether the change introduced a

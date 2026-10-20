@@ -1,11 +1,91 @@
 package tui
 
 import (
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestRenderFindings_OriginTransitionsKeepCursorAndSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		origins    []string
+		cursor     int
+		maxVisible int
+		want       []string
+	}{
+		{
+			name:    "pre-existing introduced pre-existing",
+			origins: []string{"pre-existing", "introduced", "pre-existing"}, cursor: 1,
+			want: []string{
+				"── Pre-existing (outside this change) ──", "[ ] W [pre-existing] a.go",
+				"── Introduced by this change ──", "> [x] W b.go",
+				"── Pre-existing (outside this change) ──", "[ ] W [pre-existing] c.go",
+			},
+		},
+		{
+			name:    "introduced pre-existing introduced",
+			origins: []string{"introduced", "pre-existing", ""}, cursor: 1,
+			want: []string{
+				"[ ] W a.go",
+				"── Pre-existing (outside this change) ──", "> [x] W [pre-existing] b.go",
+				"── Introduced by this change ──", "[ ] W c.go",
+			},
+		},
+		{
+			name:    "unknown origin transitions to introduced",
+			origins: []string{"pre-existing", "legacy", "pre-existing"}, cursor: 1,
+			want: []string{
+				"── Pre-existing (outside this change) ──", "[ ] W [pre-existing] a.go",
+				"── Introduced by this change ──", "> [x] W b.go",
+				"── Pre-existing (outside this change) ──", "[ ] W [pre-existing] c.go",
+			},
+		},
+		{
+			name:    "viewport starts inside a pre-existing group",
+			origins: []string{"pre-existing", "pre-existing", "", "pre-existing"}, cursor: 2, maxVisible: 3,
+			want: []string{
+				"── Pre-existing (outside this change) ──", "[ ] W [pre-existing] b.go",
+				"── Introduced by this change ──", "> [x] W c.go",
+				"── Pre-existing (outside this change) ──", "[ ] W [pre-existing] d.go",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var items []types.Finding
+			for i, origin := range tc.origins {
+				file := fmt.Sprintf("%c.go", 'a'+i)
+				items = append(items, types.Finding{ID: file, File: file, Description: "defect", Severity: "warning", Action: types.ActionAskUser, Origin: origin})
+			}
+			raw, err := types.MarshalFindingsJSON(types.Findings{Items: items})
+			if err != nil {
+				t.Fatal(err)
+			}
+			selected := map[string]bool{items[tc.cursor].ID: true}
+			content, _ := renderFindingsWithSelection(raw, 80, tc.cursor, selected, tc.maxVisible)
+			maxLines := 100
+			if tc.maxVisible > 0 {
+				maxLines = 14
+			}
+			heightContent, _ := renderFindingsWithSelectionHeight(raw, 80, tc.cursor, selected, maxLines)
+			for renderer, rendered := range map[string]string{"viewport": content, "height": heightContent} {
+				var got []string
+				for _, line := range strings.Split(stripANSI(rendered), "\n") {
+					line = strings.TrimSpace(line)
+					if strings.HasPrefix(line, "──") || strings.HasSuffix(line, ".go") {
+						got = append(got, line)
+					}
+				}
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("%s origin headings and finding rows = %q, want %q", renderer, got, tc.want)
+				}
+			}
+		})
+	}
+}
 
 // The TUI findings list groups pre-existing findings under their own header so
 // the operator sees which findings sit outside the diff, and tags each
