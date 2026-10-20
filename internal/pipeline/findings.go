@@ -69,6 +69,11 @@ func findingKey(item types.Finding) types.Finding {
 	item.Action = ""
 	item.Source = ""
 	item.UserInstructions = ""
+	// Origin is the reviewer's own label, and a later round may relabel it
+	// (introduced -> pre-existing) without the defect changing. Identity is
+	// content-derived, so a relabel must merge onto the outstanding finding
+	// instead of minting a second one for the same defect.
+	item.Origin = ""
 	return item
 }
 
