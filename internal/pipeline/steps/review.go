@@ -951,10 +951,8 @@ const maxRereviewFocusStatLines = 200
 // prior fix left behind or moved).
 //
 // The coverage contract is deliberately untouched: the complete change is
-// still reviewed, reviewed_paths must still certify every reviewable path,
-// and the "present at round N's review" marker is prose in the description,
-// so finding identity and the carry-forward set are unchanged. An initial
-// review has no prior round to name and returns "" - today's prompt,
+// still reviewed, and reviewed_paths must still certify every reviewable path.
+// An initial review has no prior round to name and returns "" - today's prompt,
 // byte-identical. Emitted only on a fixing rerun with a prior reviewed head.
 // Fail-open: a rounds or git failure drops the section rather than failing
 // the step, because it is attention guidance, not evidence.
@@ -996,7 +994,7 @@ func rereviewFocusSection(sctx *pipeline.StepContext) string {
 	b.WriteString(truncateRereviewFocusStat(sanitizePromptMultilineText(stat)))
 	b.WriteString("- Review the complete change exactly as before: unchanged files still need your judgment, and reviewed_paths must still list every changed file you actually read and judged.\n")
 	b.WriteString("- Look first at the files listed above; defects are most likely in the code no review has covered yet.\n")
-	fmt.Fprintf(&b, "- When a finding sits on code unchanged since that review, add \"present at round %d's review\" to its description, so the gate operator can tell long-reviewed code from new code at a glance.\n", prior.Round)
+	fmt.Fprintf(&b, "- When a finding sits on code unchanged since that review, add \"present at round %d's review\" to its description as an exact suffix preceded by a space, so the gate operator can tell long-reviewed code from new code at a glance.\n", prior.Round)
 	return b.String()
 }
 

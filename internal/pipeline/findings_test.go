@@ -1,10 +1,141 @@
 package pipeline
 
 import (
+	"strconv"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestReviewRoundSuffix_RestatementStaysOutstandingUntilVerified(t *testing.T) {
+	for _, line := range []int{10, 25} {
+		t.Run(strconv.Itoa(line), func(t *testing.T) {
+			original := types.Finding{ID: "review-1", Severity: "warning", File: "service.go", Line: 10, Description: "nil dereference"}
+			outstanding, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{original}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, description := range []string{
+				"nil dereference present at round 1's review",
+				"nil dereference present at round 2's review",
+				"nil dereference present at round 2's review present at round 3's review",
+				"nil dereference",
+			} {
+				restated := original
+				restated.ID = "review-9"
+				restated.Line = line
+				restated.Description = description
+				round, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{restated}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				paths := []string{"service.go"}
+				outstanding = resolveVerifiedFindingsJSON(outstanding, []string{"review-1"}, paths, paths, round)
+				outstanding = mergeOutstandingFindingsJSON(outstanding, round, paths)
+				merged, err := types.ParseFindingsJSON(outstanding)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(merged.Items) != 1 || merged.Items[0].ID != "review-1" || merged.Items[0].Description != description {
+					t.Fatalf("restatement must keep one selected row and its display annotation: %s", outstanding)
+				}
+				remapped, err := types.ParseFindingsJSON(remapFindingIDsJSON(outstanding, round))
+				if err != nil || len(remapped.Items) != 1 || remapped.Items[0].ID != "review-1" || remapped.Items[0].Description != description {
+					t.Fatalf("restatement selection lost its ID or display annotation: %#v, %v", remapped, err)
+				}
+				if got := resolveVerifiedFindingsJSON(outstanding, []string{"review-1"}, paths, paths, ""); got != "" {
+					t.Fatalf("positive verification must clear the marked finding: %s", got)
+				}
+			}
+			paths := []string{"service.go"}
+			if got := resolveVerifiedFindingsJSON(outstanding, []string{"review-1"}, nil, paths, ""); got == "" {
+				t.Fatal("silence without coverage cleared the outstanding finding")
+			}
+			if got := resolveVerifiedFindingsJSON(outstanding, []string{"review-1"}, paths, paths, ""); got != "" {
+				t.Fatalf("positive verification must clear the original selection: %s", got)
+			}
+		})
+	}
+}
+
+func TestReviewRoundSuffix_CannotMergeUnrelatedFindings(t *testing.T) {
+	original := types.Finding{ID: "review-1", Severity: "warning", File: "service.go", Line: 10, Description: "nil dereference"}
+	for _, tc := range []struct {
+		name        string
+		description string
+		file        string
+		severity    string
+	}{
+		{"different defect", "unbounded cache present at round 1's review", "service.go", "warning"},
+		{"marker in middle", "nil dereference present at round 1's review hides another defect", "service.go", "warning"},
+		{"marker in prefix", "present at round 1's review nil dereference", "service.go", "warning"},
+		{"missing separator", "nil dereferencepresent at round 1's review", "service.go", "warning"},
+		{"invalid round", "nil dereference present at round 0's review", "service.go", "warning"},
+		{"different path", "nil dereference present at round 1's review", "other.go", "warning"},
+		{"different severity", "nil dereference present at round 1's review", "service.go", "error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			other := original
+			other.Description, other.File, other.Severity = tc.description, tc.file, tc.severity
+			if SameFinding(original, other) || SameFinding(other, original) || FindingDecisionKey(original) == FindingDecisionKey(other) {
+				t.Fatal("annotation hid a substantive identity difference")
+			}
+			existing, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{original}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			round, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{other}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			merged, err := types.ParseFindingsJSON(mergeOutstandingFindingsJSON(existing, round, nil))
+			if err != nil || len(merged.Items) != 2 || merged.Items[0].ID == merged.Items[1].ID {
+				t.Fatalf("unrelated findings must retain separate identities: %#v, %v", merged, err)
+			}
+		})
+	}
+}
+
+func TestReviewRoundSuffix_DecisionsAndRecoveryKeepIdentity(t *testing.T) {
+	original := types.Finding{ID: "review-1", Severity: "warning", File: "service.go", Line: 10, Description: "nil dereference"}
+	marked := original
+	marked.Description = "nil dereference present at round 12's review"
+	if !SameFinding(original, marked) || !SameFinding(marked, original) || FindingDecisionKey(original) != FindingDecisionKey(marked) {
+		t.Fatal("display annotation changed the recorded decision's identity")
+	}
+	prior, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{original}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{marked}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection := `["review-1"]`
+	identities := selectedFindingIdentities([]*db.StepRound{{FindingsJSON: &prior, SelectedFindingIDs: &selection}})
+	retained := retainFindingIDsByIdentity(latest, []string{"review-1"}, identities)
+	if len(retained) != 1 || retained[0] != "review-1" {
+		t.Fatalf("recovery lost the selected finding: %v", retained)
+	}
+	marked.Description = "unbounded cache present at round 12's review"
+	unrelated, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{marked}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained := retainFindingIDsByIdentity(unrelated, []string{"review-1"}, identities); len(retained) != 0 {
+		t.Fatalf("marker forged the historical selection: %v", retained)
+	}
+}
+
+func TestReviewRoundSuffix_LineShiftDoesNotMergeAmbiguousFindings(t *testing.T) {
+	existing := `{"findings":[{"id":"review-1","severity":"warning","file":"service.go","line":10,"description":"nil dereference"},{"id":"review-2","severity":"warning","file":"service.go","line":20,"description":"nil dereference"}]}`
+	round := `{"findings":[{"id":"review-1","severity":"warning","file":"service.go","line":30,"description":"nil dereference present at round 1's review"}]}`
+	merged, err := types.ParseFindingsJSON(mergeOutstandingFindingsJSON(existing, round, nil))
+	if err != nil || len(merged.Items) != 3 {
+		t.Fatalf("annotation must not disambiguate distinct line anchors: %#v, %v", merged, err)
+	}
+}
 
 func TestMergeFindingsJSON_KeepsDistinctFindingsWithSameAutoID(t *testing.T) {
 	existingRaw := `{"findings":[{"id":"review-1","severity":"warning","description":"first"}],"summary":"1 finding"}`

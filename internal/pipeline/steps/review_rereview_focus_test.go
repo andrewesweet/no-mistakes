@@ -52,7 +52,7 @@ func fixAndRereviewRunsExecute(t *testing.T, sctx *pipeline.StepContext) []agent
 
 const (
 	rereviewFocusHeader        = "\n\nRereview focus:"
-	rereviewFocusMarkerPast    = `add "present at round 1's review" to its description`
+	rereviewFocusMarkerPast    = `add "present at round 1's review" to its description as an exact suffix preceded by a space`
 	rereviewFocusFullCoverDuty = "Review the complete change exactly as before"
 )
 
