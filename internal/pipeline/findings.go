@@ -86,7 +86,7 @@ func findingKey(item types.Finding) types.Finding {
 }
 
 // SameFinding reports whether a and b describe the same finding, ignoring the
-// ID, action, source, and operator instructions a later round may restate.
+// ID, action, source, operator instructions, and trailing review-round markers.
 func SameFinding(a, b types.Finding) bool {
 	return findingKey(a) == findingKey(b)
 }
@@ -655,11 +655,11 @@ func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, rev
 // re-minted instead), and the merged payload carries this round's coverage
 // record rather than the outstanding set's stale copy.
 //
-// Identity is still content-derived: a reworded restatement of an existing
-// finding does not match its original and is appended as a second item. That
-// is accepted rather than fixed here - it over-blocks instead of dropping
-// anything, and stable finding identity is a separate design pass (Parts 2+3
-// of the scout report).
+// Identity is still content-derived (see SameFinding for exclusions): a
+// substantively reworded restatement does not match its original and is
+// appended as a second item. That is accepted rather than fixed here - it
+// over-blocks instead of dropping anything, and stable finding identity is a
+// separate design pass (Parts 2+3 of the scout report).
 func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string, reviewedPaths []string) string {
 	if additionalRaw == "" {
 		if existingRaw == "" {

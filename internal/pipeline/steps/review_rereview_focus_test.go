@@ -266,6 +266,47 @@ func TestReviewStep_RereviewFocusSection_UnchangedHeadReportsNoDelta(t *testing.
 	}
 }
 
+// The intent keeps full-coverage certification unchanged. A reviewer that
+// follows the focus list exclusively must therefore leave the original file
+// unverified, even after the focused coverage-completion turn.
+func TestReviewStep_RereviewFocusSection_DeltaOnlyCoverageCannotCertify(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, priorHead := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "review-fix.txt")
+	gitCmd(t, dir, "commit", "-m", "fix another file")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	ag := newCoverageScriptedAgent(t, []coverageScript{
+		{onCompletion: false, output: coverageFindingJSON([]string{"review-fix.txt"})},
+		{onCompletion: true, output: coverageFindingJSON([]string{"review-fix.txt"})},
+	})
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	seedReviewRound(t, sctx, 1, "initial", priorHead)
+	sctx.Fixing = true
+	sctx.SkipFixExecution = true
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.NeedsApproval {
+		t.Fatalf("delta-only coverage certified the full change: %+v", outcome)
+	}
+	if len(outcome.ReviewablePaths) != 2 || outcome.ReviewablePaths[0] != "feature.txt" || outcome.ReviewablePaths[1] != "review-fix.txt" {
+		t.Fatalf("focus narrowed the full review scope: %v", outcome.ReviewablePaths)
+	}
+	if len(outcome.ReviewedPaths) != 1 || outcome.ReviewedPaths[0] != "review-fix.txt" {
+		t.Fatalf("completion fabricated coverage for the original file: %v", outcome.ReviewedPaths)
+	}
+}
+
 // TestTruncateRereviewFocusStat pins the diff summary's bounding: a long stat
 // is cut to the line cap with an explicit omission note, and an empty stat
 // renders the no-delta line.
