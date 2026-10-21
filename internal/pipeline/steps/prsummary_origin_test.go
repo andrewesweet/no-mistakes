@@ -35,9 +35,9 @@ func TestWriteFindingItems_InterleavedOriginsPartitionInBothFormats(t *testing.T
 	}
 }
 
-// The PR body groups pre-existing review findings under their own marker
-// inside the step's findings list, so a PR reader sees which findings the
-// change did not introduce. Bullets render exactly as before otherwise.
+// The generated PR Markdown must separate the origin groups with a standalone
+// paragraph. CommonMark's list continuation rules require blank lines around
+// that paragraph; ordering alone also accepts a label inside the preceding item.
 func TestWriteFindingItems_GroupsPreExistingFindings(t *testing.T) {
 	sr := &db.StepResult{ID: "review", StepName: types.StepReview}
 	findings := &types.Findings{
@@ -50,21 +50,11 @@ func TestWriteFindingItems_GroupsPreExistingFindings(t *testing.T) {
 	writeFindingItems(&b, sr, findings, prBodyMarkdown)
 	got := b.String()
 
-	group := strings.Index(got, "Pre-existing findings (outside this change)")
-	if group < 0 {
-		t.Fatalf("PR body missing the pre-existing group marker:\n%s", got)
-	}
-	old := strings.Index(got, "old defect")
-	if old < group {
-		t.Fatalf("pre-existing finding must render under the group marker:\n%s", got)
-	}
-	fresh := strings.Index(got, "fresh defect")
-	if fresh > group {
-		t.Fatalf("introduced finding must render above the group marker:\n%s", got)
-	}
-	// The pre-existing bullet keeps the ordinary finding rendering.
-	if !strings.Contains(got, "`legacy.go:3` - old defect") {
-		t.Fatalf("pre-existing bullet lost its location rendering:\n%s", got)
+	want := "- 🚨 `new.go:10` - fresh defect\n\n" +
+		"**Pre-existing findings (outside this change):**\n\n" +
+		"- ⚠️ `legacy.go:3` - old defect\n"
+	if got != want {
+		t.Fatalf("PR Markdown must keep the origin label outside both finding lists:\nwant:\n%s\ngot:\n%s", want, got)
 	}
 }
 

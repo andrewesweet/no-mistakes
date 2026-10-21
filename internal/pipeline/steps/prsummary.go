@@ -1567,7 +1567,7 @@ func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Fi
 		// Bold inline text, deliberately not a "### " heading: the PR-body
 		// truncation parser treats a line-initial "### " as a step-fold
 		// boundary, and this group is inside a step's fold, not a fold.
-		b.WriteString("**Pre-existing findings (outside this change):**\n")
+		b.WriteString("\n**Pre-existing findings (outside this change):**\n\n")
 		for _, f := range findings.Items {
 			if !f.IsPreExisting() {
 				continue
