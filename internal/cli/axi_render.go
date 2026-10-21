@@ -762,7 +762,7 @@ func findingRows(items []types.Finding) []findingRow {
 	return rows
 }
 
-// preExistingFindingRows returns the gate rows for findings the reviewer
+// preExistingFindingRows returns the gate and log rows for findings the reviewer
 // labelled pre-existing, i.e. outside the change. Effective origin is used,
 // so an unknown or missing label never moves a finding out of the main group.
 func preExistingFindingRows(items []types.Finding) []findingRow {
