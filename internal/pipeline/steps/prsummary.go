@@ -1550,21 +1550,45 @@ func fixRoundLine(r *db.StepRound) string {
 }
 
 // writeFindingItems renders each finding as a `file:line - description` bullet,
-// followed by any test command details for the test step.
+// followed by any test command details for the test step. Findings the
+// reviewer labelled pre-existing render under their own group marker after the
+// change's own findings, so a PR reader sees which findings sit outside the
+// diff; the bullets themselves are identical in both groups.
 func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Findings, flavor prBodyFlavor) {
+	hasPreExisting := false
 	for _, f := range findings.Items {
-		emoji := severityEmoji(f.Severity)
-		loc := ""
-		if f.File != "" {
-			loc = fmt.Sprintf("`%s", escapePRText(f.File, flavor))
-			if f.Line > 0 {
-				loc += fmt.Sprintf(":%d", f.Line)
-			}
-			loc += "` - "
+		if f.IsPreExisting() {
+			hasPreExisting = true
+			continue
 		}
-		b.WriteString(fmt.Sprintf("- %s %s%s\n", emoji, loc, escapePRText(f.Description, flavor)))
+		writeFindingBullet(b, f, flavor)
+	}
+	if hasPreExisting {
+		// Bold inline text, deliberately not a "### " heading: the PR-body
+		// truncation parser treats a line-initial "### " as a step-fold
+		// boundary, and this group is inside a step's fold, not a fold.
+		b.WriteString("\n**Pre-existing findings (outside this change):**\n\n")
+		for _, f := range findings.Items {
+			if !f.IsPreExisting() {
+				continue
+			}
+			writeFindingBullet(b, f, flavor)
+		}
 	}
 	writeTestedDetails(b, sr, findings, flavor)
+}
+
+func writeFindingBullet(b *strings.Builder, f types.Finding, flavor prBodyFlavor) {
+	emoji := severityEmoji(f.Severity)
+	loc := ""
+	if f.File != "" {
+		loc = fmt.Sprintf("`%s", escapePRText(f.File, flavor))
+		if f.Line > 0 {
+			loc += fmt.Sprintf(":%d", f.Line)
+		}
+		loc += "` - "
+	}
+	b.WriteString(fmt.Sprintf("- %s %s%s\n", emoji, loc, escapePRText(f.Description, flavor)))
 }
 
 // writeTestedDetails lists what the test step exercised: its live-validation

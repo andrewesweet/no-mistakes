@@ -312,7 +312,8 @@ var reviewFindingsSchema = json.RawMessage(`{
 					"line": {"type": "integer"},
 					"description": {"type": "string"},
 					"action": {"type": "string", "enum": ["no-op", "auto-fix", "ask-user"]},
-					"review_scope": {"type": "string", "enum": ["source", "pipeline-owned-delivery", "external-delivery"]}
+					"review_scope": {"type": "string", "enum": ["source", "pipeline-owned-delivery", "external-delivery"]},
+					"origin": {"type": "string", "enum": ["introduced", "pre-existing"], "description": "set introduced when the finding is about code this change introduced or made worse; set pre-existing only when the finding is entirely in code this change did not introduce. Omitting origin means introduced."}
 				},
 				"required": ["severity", "description", "action", "review_scope"]
 			}

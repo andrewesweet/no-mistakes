@@ -732,6 +732,12 @@ func gateFieldsWithHelp(gate stepView, help []string) []toon.Field {
 		gfields = append(gfields, toon.Field{Key: "note", Value: "Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking and ask-user review findings park for your decision rather than being silently self-fixed."})
 	}
 	gfields = append(gfields, toon.Field{Key: "findings", Value: findingRows(parsed.Items)})
+	if preExisting := preExistingFindingRows(parsed.Items); len(preExisting) > 0 {
+		// Pre-existing findings render as their own group: the operator reads
+		// at a glance which findings sit outside the diff, without the origin
+		// label having to change any finding's blocking or auto-fix meaning.
+		gfields = append(gfields, toon.Field{Key: "pre_existing_findings", Value: preExisting})
+	}
 
 	return []toon.Field{
 		{Key: "gate", Value: toon.NewObject(gfields...)},
@@ -742,6 +748,29 @@ func gateFieldsWithHelp(gate stepView, help []string) []toon.Field {
 func findingRows(items []types.Finding) []findingRow {
 	rows := make([]findingRow, 0, len(items))
 	for _, f := range items {
+		if f.IsPreExisting() {
+			continue
+		}
+		rows = append(rows, findingRow{
+			ID:          f.ID,
+			Severity:    f.Severity,
+			File:        f.File,
+			Action:      f.Action,
+			Description: f.Description,
+		})
+	}
+	return rows
+}
+
+// preExistingFindingRows returns the gate and log rows for findings the reviewer
+// labelled pre-existing, i.e. outside the change. Effective origin is used,
+// so an unknown or missing label never moves a finding out of the main group.
+func preExistingFindingRows(items []types.Finding) []findingRow {
+	var rows []findingRow
+	for _, f := range items {
+		if !f.IsPreExisting() {
+			continue
+		}
 		rows = append(rows, findingRow{
 			ID:          f.ID,
 			Severity:    f.Severity,
@@ -778,6 +807,9 @@ func recordedFindingsFields(findingsJSON string, full bool) ([]toon.Field, bool)
 	}
 	if len(parsed.Items) > 0 {
 		fields = append(fields, toon.Field{Key: "findings", Value: findingRows(parsed.Items)})
+		if preExisting := preExistingFindingRows(parsed.Items); len(preExisting) > 0 {
+			fields = append(fields, toon.Field{Key: "pre_existing_findings", Value: preExisting})
+		}
 	}
 	return fields, bounded
 }

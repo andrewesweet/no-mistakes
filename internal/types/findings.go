@@ -193,6 +193,14 @@ func KnownScenarioResults() []string { return slices.Clone(knownScenarioResults)
 // have to name what they accept.
 func KnownTestVerdicts() []string { return slices.Clone(knownTestVerdicts) }
 
+// Finding origin values. Origin is the reviewer's own label for whether a
+// finding is about code this change introduced or code that predates it; it is
+// display grouping only and never changes blocking or auto-fix semantics.
+const (
+	FindingOriginIntroduced  = "introduced"
+	FindingOriginPreExisting = "pre-existing"
+)
+
 // Finding represents a single review, test, lint, or PR comment finding.
 type Finding struct {
 	ID               string `json:"id,omitempty"`
@@ -204,6 +212,12 @@ type Finding struct {
 	Source           string `json:"source,omitempty"`
 	UserInstructions string `json:"user_instructions,omitempty"`
 	ReviewScope      string `json:"review_scope,omitempty"`
+	// Origin is the reviewer's optional label for whether the finding is
+	// introduced by this change or pre-existing in code the change did not
+	// write. A missing or unknown value counts as introduced
+	// (OriginOrDefault), so the fail-safe direction keeps the finding
+	// blocking exactly as today and pre-existing is ever only a grouping.
+	Origin string `json:"origin,omitempty"`
 	// Category separates the combined document+lint housekeeping pass's
 	// findings into their owning gates and the CI step's findings by kind
 	// (see the FindingCategoryCI* constants). Empty everywhere else.
@@ -281,6 +295,7 @@ type findingWire struct {
 	Source              string `json:"source,omitempty"`
 	UserInstructions    string `json:"user_instructions,omitempty"`
 	ReviewScope         string `json:"review_scope,omitempty"`
+	Origin              string `json:"origin,omitempty"`
 	Category            string `json:"category,omitempty"`
 	Check               string `json:"check,omitempty"`
 	CheckID             string `json:"check_id,omitempty"`
@@ -668,6 +683,7 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	f.Source = wire.Source
 	f.UserInstructions = wire.UserInstructions
 	f.ReviewScope = wire.ReviewScope
+	f.Origin = wire.Origin
 	f.Category = wire.Category
 	f.Check = wire.Check
 	f.CheckID = wire.CheckID
@@ -694,4 +710,22 @@ func (f Finding) ActionOrDefault() string {
 		return ActionAskUser
 	}
 	return f.Action
+}
+
+// OriginOrDefault resolves a finding's effective origin. A missing or unknown
+// value counts as FindingOriginIntroduced: the reviewer never had to set the
+// field, older findings legitimately lack it, and an unrecognized label must
+// never silently reclassify a finding out of the change's group. Pre-existing
+// is display grouping only - it never changes blocking or auto-fix
+// semantics.
+func (f Finding) OriginOrDefault() string {
+	if f.Origin == FindingOriginPreExisting {
+		return FindingOriginPreExisting
+	}
+	return FindingOriginIntroduced
+}
+
+// IsPreExisting reports whether the finding's effective origin is pre-existing.
+func (f Finding) IsPreExisting() bool {
+	return f.OriginOrDefault() == FindingOriginPreExisting
 }

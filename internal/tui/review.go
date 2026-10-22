@@ -288,6 +288,19 @@ func renderFindingsRange(f *findings, width int, cursor int, selected map[string
 			pointer = blueStyle.Render(">")
 		}
 
+		// Origin headers mark transitions in both directions and the first
+		// visible pre-existing row. Each pre-existing row is also tagged.
+		// Grouping is display-only: cursor and selection indexing are untouched.
+		preExisting := item.IsPreExisting()
+		if preExisting && (idx == start || !f.Items[idx-1].IsPreExisting()) {
+			if idx > start {
+				b.WriteString("\n")
+			}
+			b.WriteString(dimStyle.Render("── Pre-existing (outside this change) ──") + "\n")
+		} else if !preExisting && idx > start && f.Items[idx-1].IsPreExisting() {
+			b.WriteString("\n" + dimStyle.Render("── Introduced by this change ──") + "\n")
+		}
+
 		// Unfocused severity icons are dim to match description/file ref dimming.
 		iconStyled := style.Render(icon)
 		if idx != cursor {
@@ -299,6 +312,12 @@ func renderFindingsRange(f *findings, width int, cursor int, selected map[string
 		// visible when unfocused and do not shift alignment of the ref.
 		if item.Source == nmtypes.FindingSourceUser {
 			line += " " + blueStyle.Render("[user]")
+		}
+		// Same for pre-existing findings: the tag rides the row so a
+		// pre-existing finding stays legible as outside-the-change even when
+		// it sits between introduced rows.
+		if preExisting {
+			line += " " + dimStyle.Render("[pre-existing]")
 		}
 
 		// File:line reference, truncated to fit within content width.

@@ -69,6 +69,11 @@ func findingKey(item types.Finding) types.Finding {
 	item.Action = ""
 	item.Source = ""
 	item.UserInstructions = ""
+	// Origin is the reviewer's own label, and a later round may relabel it
+	// (introduced -> pre-existing) without the defect changing. Identity is
+	// content-derived, so a relabel must merge onto the outstanding finding
+	// instead of minting a second one for the same defect.
+	item.Origin = ""
 	return item
 }
 
@@ -150,7 +155,7 @@ func mergeFindingsJSON(existingRaw, additionalRaw string) string {
 	if err != nil {
 		return existingRaw
 	}
-	seen := make(map[types.Finding]bool, len(existing.Items)+len(additional.Items))
+	seen := make(map[types.Finding]int, len(existing.Items)+len(additional.Items))
 	existingCounts := countFindingFingerprints(existing.Items)
 	additionalCounts := countFindingFingerprints(additional.Items)
 	merged := types.FindingsMetadata(existing)
@@ -160,19 +165,29 @@ func mergeFindingsJSON(existingRaw, additionalRaw string) string {
 		merged.RiskScope = additional.RiskScope
 	}
 	for _, item := range existing.Items {
+		seen[findingKey(item)] = len(merged.Items)
 		merged.Items = append(merged.Items, item)
-		seen[findingKey(item)] = true
 	}
 	for _, item := range additional.Items {
-		if hasFindingMatch(item, seen, additionalCounts, existingCounts) {
-			continue
-		}
 		key := findingKey(item)
-		if seen[key] {
+		index, matched := seen[key]
+		if !matched {
+			fingerprint := findingFingerprint(item)
+			if additionalCounts[fingerprint] == 1 && existingCounts[fingerprint] == 1 {
+				for i, previous := range existing.Items {
+					if findingFingerprint(previous) == fingerprint {
+						index, matched = i, true
+						break
+					}
+				}
+			}
+		}
+		if matched {
+			merged.Items[index].Origin = item.Origin
 			continue
 		}
+		seen[key] = len(merged.Items)
 		merged.Items = append(merged.Items, item)
-		seen[key] = true
 	}
 	if len(merged.Items) == 0 {
 		return ""

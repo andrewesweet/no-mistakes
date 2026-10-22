@@ -147,6 +147,7 @@ Context:
 
 Rules:
 - Always start with double checking whether the findings are legitimate.
+- A finding marked origin "pre-existing" describes a defect in code this change did not introduce. It is outside the change unless the operator selected it: it reaches this list only because the operator selected it for this round, so make the smallest correction that satisfies it, and do not expand the fix into other pre-existing code you notice along the way. Findings without an origin marker are part of this change.
 - Before changing code, identify whether each finding is a local defect or a symptom of a deeper design, abstraction, validation, ownership, or test-coverage flaw. Prefer the smallest correct root-cause fix within the changed area over patching only the reported line.
 - Before changing code, state for each finding the invariant it violates (what must always hold, in one sentence) and enumerate every place in the changed area where that same invariant must hold: every axis, direction, and representation; every sibling call path, command, action, and state transition; every consumer of the same input, field, or record. Fix the invariant at all of those places in this round, with the same small correction, or at the one shared boundary that makes all of them hold. A fix that closes only the reported site and leaves a sibling site reachable is incomplete; the next review will report the sibling.
 - Do not grow the fix into machinery: closing sibling sites with the same small edit, or moving a check to one shared boundary, is the fix; adding handling, state, fallbacks, retries, or a subsystem to manage symptoms is not. Prefer addressing a deeper architectural reason and simplifying it, than introducing machinery to handle the symptoms.
@@ -374,6 +375,10 @@ Rules:
   - "source": every source-verifiable finding, including any finding that mixes a source defect with a delivery claim.
   - "pipeline-owned-delivery": only a finding whose sole claim is that this run's remote branch, push, PR, or CI output is not present yet.
   - "external-delivery": a pre-existing or external PR, third-party artifact, or other lifecycle requirement not owned by this run.
+- For each finding, set origin to exactly one of:
+  - "introduced": the defect or risk is in code this change introduced or made worse. This is the default.
+  - "pre-existing": the finding is entirely in code this change did not introduce; the defect predates the change and the change did not make it more likely or more severe. Set this only when you can point at the diff and show it neither wrote nor worsened that code. A finding that mixes both is "introduced".
+  Omitting origin means "introduced". Origin is grouping for the operator, never a downgrade: severity, action, and blocking behavior do not change.
 
 Simplification (a dedicated pass over what the change introduced, in addition to the findings above):
 - Enumerate every component the change introduced: a new branch, acceptance or matching path, fallback, alias, mode, flag, option, a second definition of a concept the code already defines once, or a parallel copy of a rule. Judge each one against the User intent when one is stated, otherwise against the change's own stated purpose. The stated purpose sets the required scope, not the implementation.
