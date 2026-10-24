@@ -1517,6 +1517,11 @@ rounds:
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
+		// Configured commands can report cancellation as an exit code instead
+		// of an error. Fail interrupted execution before it can create a gate.
+		if err == nil {
+			err = context.Cause(ctx)
+		}
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
