@@ -224,11 +224,17 @@ type GlobalConfig struct {
 	// survives on this machine. Global-only for the same reason as Eval: it
 	// describes local disk retention, never a repository policy, so no
 	// pushed branch may set it.
-	Worktree                  Worktree      `yaml:"-"`
-	CITimeout                 time.Duration `yaml:"-"`
-	StepQuietWarning          time.Duration `yaml:"-"`
-	AgentTimeout              time.Duration `yaml:"-"`
-	AgentCrashRetries         int           `yaml:"-"`
+	Worktree          Worktree      `yaml:"-"`
+	CITimeout         time.Duration `yaml:"-"`
+	StepQuietWarning  time.Duration `yaml:"-"`
+	AgentTimeout      time.Duration `yaml:"-"`
+	AgentCrashRetries int           `yaml:"-"`
+	// MaxConcurrentRuns caps how many pipeline runs may execute at once on
+	// this machine. A newly submitted run past the cap waits in the pending
+	// queue in submission order until a running run finishes, fails, or is
+	// cancelled. Zero (the default) means unlimited. Global-only: it admits
+	// this machine's daemon-wide execution, so no pushed branch may set it.
+	MaxConcurrentRuns         int           `yaml:"-"`
 	AgentTimeoutsConfigured   bool          `yaml:"-"`
 	ReviewAgentTimeout        time.Duration `yaml:"-"`
 	TestAgentTimeout          time.Duration `yaml:"-"`
@@ -306,6 +312,7 @@ type globalConfigRaw struct {
 	StepQuietWarning          string                     `yaml:"step_quiet_warning"`
 	AgentTimeout              string                     `yaml:"agent_timeout"`
 	AgentCrashRetries         int                        `yaml:"agent_crash_retries"`
+	MaxConcurrentRuns         int                        `yaml:"max_concurrent_runs"`
 	ReviewAgentTimeout        string                     `yaml:"review_agent_timeout"`
 	TestAgentTimeout          string                     `yaml:"test_agent_timeout"`
 	AgentWorkingTimeout       string                     `yaml:"agent_working_timeout"`
@@ -879,13 +886,17 @@ type Config struct {
 	AgentConfig           map[string]agentcfg.Profile
 	// QuotaRouting and QuotaProviders are copied from global config only (see
 	// GlobalConfig.QuotaRouting); no repository layer can set either.
-	QuotaRouting              QuotaRouting
-	QuotaProviders            map[string]string
-	ReviewAgents              map[string]ReviewAgent
-	CITimeout                 time.Duration
-	StepQuietWarning          time.Duration
-	AgentTimeout              time.Duration
-	AgentCrashRetries         int
+	QuotaRouting      QuotaRouting
+	QuotaProviders    map[string]string
+	ReviewAgents      map[string]ReviewAgent
+	CITimeout         time.Duration
+	StepQuietWarning  time.Duration
+	AgentTimeout      time.Duration
+	AgentCrashRetries int
+	// MaxConcurrentRuns is the resolved daemon-wide execution cap, copied
+	// from global config only (see GlobalConfig.MaxConcurrentRuns); no
+	// repository layer can set it.
+	MaxConcurrentRuns         int
 	AgentTimeoutsConfigured   bool
 	ReviewAgentTimeout        time.Duration
 	TestAgentTimeout          time.Duration
@@ -1530,6 +1541,11 @@ agent_timeout: "30m"
 # Additional attempts for an agent-crashed validation step (0-3, opt-in).
 # Requires unchanged head, base, config, clean worktree and evidence.
 agent_crash_retries: 0
+
+# Optional cap on how many pipeline runs execute at once on this machine.
+# Past the cap, newly submitted runs wait in submission order (pending)
+# until a running run finishes, fails, or is cancelled. 0 means unlimited.
+# max_concurrent_runs: 1
 
 # Optional cap for a turn that is still producing output or waiting on a live
 # child. Unset means no extension past agent_timeout. Must be at least
@@ -2772,6 +2788,10 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		return nil, fmt.Errorf("agent_crash_retries must be between 0 and 3")
 	}
 	cfg.AgentCrashRetries = raw.AgentCrashRetries
+	if raw.MaxConcurrentRuns < 0 {
+		return nil, fmt.Errorf("max_concurrent_runs must be 0 or greater (0 means unlimited)")
+	}
+	cfg.MaxConcurrentRuns = raw.MaxConcurrentRuns
 	configuredTimeout := false
 	if raw.AgentTimeout != "" {
 		d, err := parsePositiveDuration("agent_timeout", raw.AgentTimeout)
@@ -4021,6 +4041,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		StepQuietWarning:          global.StepQuietWarning,
 		AgentTimeout:              global.AgentTimeout,
 		AgentCrashRetries:         global.AgentCrashRetries,
+		MaxConcurrentRuns:         global.MaxConcurrentRuns,
 		AgentTimeoutsConfigured:   global.AgentTimeoutsConfigured,
 		ReviewAgentTimeout:        global.ReviewAgentTimeout,
 		TestAgentTimeout:          global.TestAgentTimeout,
