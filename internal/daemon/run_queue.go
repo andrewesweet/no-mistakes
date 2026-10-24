@@ -3,12 +3,14 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"os"
 	"slices"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -36,12 +38,20 @@ func (m *RunManager) slotFreeLocked(maxConc int) bool {
 	return maxConc <= 0 || len(m.executors) < maxConc
 }
 
+// executionCapLocked reloads the cap while m.mu is held. Read the file directly:
+// LoadGlobal treats a missing file as defaults, which would clear a loaded cap
+// during config replacement. The initial zero still means unlimited.
 func (m *RunManager) executionCapLocked() int {
-	global, err := config.LoadGlobal(m.paths.ConfigFile())
+	data, err := os.ReadFile(m.paths.ConfigFile())
+	if err == nil {
+		var global *config.GlobalConfig
+		global, err = config.LoadGlobalFromBytes(data)
+		if err == nil {
+			m.maxConcurrentRuns = global.MaxConcurrentRuns
+		}
+	}
 	if err != nil {
 		slog.Warn("failed to load global config for execution cap; retaining previous limit", "error", err)
-	} else {
-		m.maxConcurrentRuns = global.MaxConcurrentRuns
 	}
 	return m.maxConcurrentRuns
 }
@@ -180,6 +190,17 @@ func (m *RunManager) cancelQueuedRun(qe queuedRun, cause string) {
 		if dbErr := m.db.CompleteRunAwaitingAgent(qe.runID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 			slog.Warn("failed to complete queued run awaiting-agent state", "run_id", qe.runID, "error", dbErr)
 		}
+	}
+	if err == nil {
+		status := string(types.RunCancelled)
+		event := ipc.Event{
+			Type: ipc.EventRunCompleted, RunID: qe.runID, RepoID: qe.repoID,
+			Branch: &qe.branch, Status: &status, Error: &cause,
+		}
+		if qe.recovered != nil {
+			event.PRURL = qe.recovered.PRURL
+		}
+		m.broadcast(event)
 	}
 	if err == nil && (qe.recovered == nil || verified) {
 		m.removeRunWorktree(qe.repoID, qe.runID, qe.gateDir, qe.wtDir, "queued_run_cancelled")

@@ -388,29 +388,159 @@ func TestMaxConcurrentRuns_ConcurrentSubmissionsPreserveAdmissionOrder(t *testin
 }
 
 func TestMaxConcurrentRuns_ConfigErrorRetainsCap(t *testing.T) {
-	started := make(chan string, 4)
-	p, d := startTestDaemonWithMaxConcurrentRuns(t, 1, func() []pipeline.Step {
-		return []pipeline.Step{&notifyBlockStep{name: types.StepReview, started: started}}
-	})
-	_, head := setupTestGitRepo(t, p, d, "unreadable-cap")
-	gateDir := p.RepoDir("unreadable-cap")
-	first := submitBranchRun(t, p, gateDir, "feature/first", head)
-	expectQueuedBranch(t, started, "feature/first")
-	second := submitBranchRun(t, p, gateDir, "feature/second", head)
-	third := submitBranchRun(t, p, gateDir, "feature/third", head)
-	if err := os.WriteFile(p.ConfigFile(), []byte("agent: [invalid\n"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, failure := range []string{"invalid", "missing", "unreadable_replacement"} {
+		t.Run(failure, func(t *testing.T) {
+			started := make(chan string, 4)
+			p, d := startTestDaemonWithMaxConcurrentRuns(t, 1, func() []pipeline.Step {
+				return []pipeline.Step{&notifyBlockStep{name: types.StepReview, started: started}}
+			})
+			_, head := setupTestGitRepo(t, p, d, "unreadable-cap")
+			gateDir := p.RepoDir("unreadable-cap")
+			first := submitBranchRun(t, p, gateDir, "feature/first", head)
+			expectQueuedBranch(t, started, "feature/first")
+			second := submitBranchRun(t, p, gateDir, "feature/second", head)
+			third := submitBranchRun(t, p, gateDir, "feature/third", head)
+			if err := os.Rename(p.ConfigFile(), p.ConfigFile()+".old"); err != nil {
+				t.Fatal(err)
+			}
+			switch failure {
+			case "invalid":
+				if err := os.WriteFile(p.ConfigFile(), []byte("agent: [invalid\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable_replacement":
+				// A directory cannot be read as a config file, even under root or
+				// on platforms that do not enforce Unix file permissions.
+				if err := os.Mkdir(p.ConfigFile(), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cancelRun(t, p, first)
+			expectQueuedBranch(t, started, "feature/second")
+			expectNoQueuedBranch(t, started)
+			if got := runStatus(t, d, third); got != types.RunPending {
+				t.Fatalf("third run status = %s, want pending under retained cap", got)
+			}
+			cancelRun(t, p, second)
+			expectQueuedBranch(t, started, "feature/third")
+			cancelRun(t, p, third)
+			waitForRunTerminalStatus(t, d, third)
+		})
 	}
-	cancelRun(t, p, first)
-	expectQueuedBranch(t, started, "feature/second")
-	expectNoQueuedBranch(t, started)
-	if got := runStatus(t, d, third); got != types.RunPending {
-		t.Fatalf("third run status = %s, want pending under retained cap", got)
+}
+
+// The cap reload contract distinguishes an initially absent config from losing
+// a configured cap, while still allowing successful edits to change the cap.
+func TestMaxConcurrentRuns_CapReloadsWithoutRestart(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	m := NewRunManager(nil, p, nil)
+	for _, change := range []struct {
+		name    string
+		content string
+		want    int
+	}{
+		{name: "initially absent", want: 0},
+		{name: "configured", content: "max_concurrent_runs: 1\n", want: 1},
+		{name: "missing after load", want: 1},
+		{name: "unparsable after load", content: "agent: [invalid\n", want: 1},
+		{name: "increased", content: "max_concurrent_runs: 2\n", want: 2},
+		{name: "explicit unlimited", content: "max_concurrent_runs: 0\n", want: 0},
+		{name: "restored cap", content: "max_concurrent_runs: 1\n", want: 1},
+		{name: "unset in valid config", content: "agent: claude\n", want: 0},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			if change.content == "" {
+				if err := os.Remove(p.ConfigFile()); err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(p.ConfigFile(), []byte(change.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			m.mu.Lock()
+			got := m.executionCapLocked()
+			m.mu.Unlock()
+			if got != change.want {
+				t.Fatalf("execution cap = %d, want %d", got, change.want)
+			}
+		})
 	}
-	cancelRun(t, p, second)
-	expectQueuedBranch(t, started, "feature/third")
-	cancelRun(t, p, third)
-	waitForRunTerminalStatus(t, d, third)
+}
+
+// The subscription contract requires every persisted cancellation to publish
+// its terminal state before closing. An abrupt close or stale revision would
+// leave a subscriber displaying the queued run until it reconnects.
+func TestMaxConcurrentRuns_QueuedCancellationPublishesTerminalEvent(t *testing.T) {
+	for _, action := range []string{"cancel", "supersede", "shutdown"} {
+		t.Run(action, func(t *testing.T) {
+			p, d := newParkedRunEnv(t)
+			content, err := os.ReadFile(p.ConfigFile())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p.ConfigFile(), append(content, []byte("max_concurrent_runs: 1\n")...), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			started := make(chan string, 4)
+			m := NewRunManager(d, p, func() []pipeline.Step {
+				return []pipeline.Step{&notifyBlockStep{name: types.StepReview, started: started}}
+			})
+			t.Cleanup(m.Shutdown)
+			repo, head := setupTestGitRepo(t, p, d, "cancel-event")
+			submit := func(branch string) string {
+				t.Helper()
+				id, err := m.startRun(context.Background(), repo, branch, head, head, "push", nil, "", "", false, "", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return id
+			}
+			submit("feature/held")
+			expectQueuedBranch(t, started, "feature/held")
+			queued := submit("feature/queued")
+			if got := runStatus(t, d, queued); got != types.RunPending {
+				t.Fatalf("queued run status = %s, want pending", got)
+			}
+			sub := subscribeDrained(t, m, queued)
+			defer sub.Close()
+			before := m.StateRev(queued)
+			wantCause := types.RunCancelReasonAbortedByUser
+			switch action {
+			case "cancel":
+				if err := m.HandleCancel(queued); err != nil {
+					t.Fatal(err)
+				}
+			case "supersede":
+				wantCause = types.RunCancelReasonSuperseded
+				submit("feature/queued")
+			case "shutdown":
+				wantCause = "daemon shutting down"
+				m.Shutdown()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			event, ok := sub.Next(ctx)
+			if !ok || event.Type != ipc.EventRunCompleted {
+				t.Fatalf("terminal event = %#v, ok = %t, want run_completed", event, ok)
+			}
+			if event.StateRev <= before || event.StateRev != m.StateRev(queued) {
+				t.Fatalf("terminal revision = %d, before = %d, current = %d", event.StateRev, before, m.StateRev(queued))
+			}
+			if event.RunID != queued || event.RepoID != repo.ID || event.Branch == nil || *event.Branch != "feature/queued" ||
+				event.Status == nil || *event.Status != string(types.RunCancelled) || event.Error == nil || *event.Error != wantCause {
+				t.Fatalf("terminal event does not describe the cancelled run: %#v", event)
+			}
+			run, err := d.GetRun(queued)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run.Status != types.RunCancelled || run.Error == nil || *run.Error != wantCause {
+				t.Fatalf("terminal event preceded persisted cancellation: %#v", run)
+			}
+			if event, ok := sub.Next(ctx); ok || ctx.Err() != nil {
+				t.Fatalf("subscription did not close after completion: event = %#v, ok = %t, error = %v", event, ok, ctx.Err())
+			}
+		})
+	}
 }
 
 func TestMaxConcurrentRuns_RecoveredParkedRunsShareCap(t *testing.T) {
