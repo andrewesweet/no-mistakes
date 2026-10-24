@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,12 +52,14 @@ type RunManager struct {
 	executors map[string]*pipeline.Executor      // runID → executor
 	cancels   map[string]context.CancelCauseFunc // runID → cancel function with cause
 	dones     map[string]chan struct{}           // runID → closed when goroutine exits
-	// runQueue holds fully set-up runs waiting for an execution slot under
+	// runQueue holds submissions waiting for setup or an execution slot under
 	// the max_concurrent_runs cap, in submission order. Guarded by mu; see
 	// run_queue.go.
-	runQueue     []queuedRun
-	wg           sync.WaitGroup // tracks background run goroutines
-	shuttingDown atomic.Bool    // prevents new runs during shutdown
+	runQueue          []queuedRun
+	nextAdmission     uint64
+	maxConcurrentRuns int
+	wg                sync.WaitGroup // tracks background run goroutines
+	shuttingDown      atomic.Bool    // prevents new runs during shutdown
 
 	afterRetryProof func() // test seam: runs between HandleRetry's proof and the launch
 	db              *db.DB
@@ -450,12 +453,20 @@ func samePath(a, b string) bool {
 }
 
 func (m *RunManager) resumeRecoveredRuns(plans []recoveredRunPlan) {
+	sort.Slice(plans, func(i, j int) bool {
+		if plans[i].run.CreatedAt == plans[j].run.CreatedAt {
+			return plans[i].run.ID < plans[j].run.ID
+		}
+		return plans[i].run.CreatedAt < plans[j].run.CreatedAt
+	})
 	for _, plan := range plans {
 		m.resumeRecoveredRun(plan)
 	}
 }
 
 func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
+	sequence := m.reserveAdmission()
+	defer m.releaseAdmission(sequence)
 	if m.shuttingDown.Load() {
 		_ = plan.agent.Close()
 		return
@@ -471,79 +482,80 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	})
 	executor.SetForgeContext(plan.forge)
 	done := make(chan struct{})
-	m.mu.Lock()
-	m.executors[plan.run.ID] = executor
-	m.cancels[plan.run.ID] = cancel
-	m.dones[plan.run.ID] = done
-	m.mu.Unlock()
-
-	m.wg.Add(1)
-	go func() {
-		startedAt := time.Now()
-		defer m.wg.Done()
-		defer close(done)
-		parkedAtShutdown := false
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				errMsg := fmt.Sprintf("internal panic: %v", recovered)
-				plan.run.Status = types.RunFailed
-				plan.run.Error = &errMsg
-				if err := m.db.UpdateRunErrorStatus(plan.run.ID, errMsg, types.RunFailed); err != nil {
-					slog.Error("failed to update recovered run after panic", "run_id", plan.run.ID, "error", err)
+	spawn := func() {
+		m.wg.Add(1)
+		go func() {
+			startedAt := time.Now()
+			defer m.wg.Done()
+			defer close(done)
+			parkedAtShutdown := false
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					errMsg := fmt.Sprintf("internal panic: %v", recovered)
+					plan.run.Status = types.RunFailed
+					plan.run.Error = &errMsg
+					if err := m.db.UpdateRunErrorStatus(plan.run.ID, errMsg, types.RunFailed); err != nil {
+						slog.Error("failed to update recovered run after panic", "run_id", plan.run.ID, "error", err)
+					}
 				}
+				cancel(nil)
+				_ = plan.agent.Close()
+				m.closeSubscribers(plan.run.ID)
+				if !parkedAtShutdown {
+					m.removeRunWorktree(plan.repo.ID, plan.run.ID, plan.gateDir, plan.workDir, "resumed_run_finished")
+					// A recovered run is a finished run too. This is the second of the
+					// two completion boundaries, and leaving it out is what let a run
+					// resumed after a daemon restart keep its empty evidence directory
+					// until some later run or restart happened to sweep it.
+					m.cleanupRunEvidence(plan.cfg, plan.run.ID)
+				}
+				m.mu.Lock()
+				delete(m.executors, plan.run.ID)
+				delete(m.cancels, plan.run.ID)
+				delete(m.dones, plan.run.ID)
+				m.mu.Unlock()
+				// A freed slot starts the next queued run, if any.
+				m.pumpQueue()
+			}()
+
+			if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); errors.Is(err, pipeline.ErrParkedAtShutdown) {
+				parkedAtShutdown = true
+				slog.Info("recovered run left parked for resume after daemon restart", "run_id", plan.run.ID)
+				return
+			} else if err != nil {
+				if plan.run.Status == types.RunRunning {
+					errMsg := err.Error()
+					plan.run.Status = types.RunFailed
+					plan.run.Error = &errMsg
+					if dbErr := m.db.UpdateRunErrorStatus(plan.run.ID, errMsg, types.RunFailed); dbErr != nil {
+						slog.Error("failed to mark recovered run failed", "run_id", plan.run.ID, "error", dbErr)
+					}
+				}
+				slog.Error("recovered pipeline failed", "run_id", plan.run.ID, "error", err)
 			}
-			cancel(nil)
-			_ = plan.agent.Close()
-			m.closeSubscribers(plan.run.ID)
-			if !parkedAtShutdown {
-				m.removeRunWorktree(plan.repo.ID, plan.run.ID, plan.gateDir, plan.workDir, "resumed_run_finished")
-				// A recovered run is a finished run too. This is the second of the
-				// two completion boundaries, and leaving it out is what let a run
-				// resumed after a daemon restart keep its empty evidence directory
-				// until some later run or restart happened to sweep it.
-				m.cleanupRunEvidence(plan.cfg, plan.run.ID)
+			fields := telemetry.Fields{
+				"action":      "finished",
+				"trigger":     "recovery",
+				"agent":       string(plan.cfg.Agent),
+				"branch_role": telemetryBranchRole(plan.run.Branch, plan.repo.DefaultBranch),
+				"status":      string(plan.run.Status),
+				"duration_ms": time.Since(startedAt).Milliseconds(),
+				"step_count":  len(plan.steps),
+				"pr_created":  plan.run.PRURL != nil && *plan.run.PRURL != "",
 			}
-			m.mu.Lock()
-			delete(m.executors, plan.run.ID)
-			delete(m.cancels, plan.run.ID)
-			delete(m.dones, plan.run.ID)
-			m.mu.Unlock()
-			// A freed slot starts the next queued run, if any.
-			m.pumpQueue()
+			if failedStep := telemetryFailedStepName(m.db, plan.run.ID); failedStep != "" {
+				fields["failed_step"] = failedStep
+			}
+			addRunPerformanceSummary(m.db, plan.run.ID, fields)
+			telemetry.Track("run", fields)
+			m.autoIngestCIFalseNegatives(runCtx, plan.cfg, plan.run.ID)
 		}()
-
-		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); errors.Is(err, pipeline.ErrParkedAtShutdown) {
-			parkedAtShutdown = true
-			slog.Info("recovered run left parked for resume after daemon restart", "run_id", plan.run.ID)
-			return
-		} else if err != nil {
-			if plan.run.Status == types.RunRunning {
-				errMsg := err.Error()
-				plan.run.Status = types.RunFailed
-				plan.run.Error = &errMsg
-				if dbErr := m.db.UpdateRunErrorStatus(plan.run.ID, errMsg, types.RunFailed); dbErr != nil {
-					slog.Error("failed to mark recovered run failed", "run_id", plan.run.ID, "error", dbErr)
-				}
-			}
-			slog.Error("recovered pipeline failed", "run_id", plan.run.ID, "error", err)
-		}
-		fields := telemetry.Fields{
-			"action":      "finished",
-			"trigger":     "recovery",
-			"agent":       string(plan.cfg.Agent),
-			"branch_role": telemetryBranchRole(plan.run.Branch, plan.repo.DefaultBranch),
-			"status":      string(plan.run.Status),
-			"duration_ms": time.Since(startedAt).Milliseconds(),
-			"step_count":  len(plan.steps),
-			"pr_created":  plan.run.PRURL != nil && *plan.run.PRURL != "",
-		}
-		if failedStep := telemetryFailedStepName(m.db, plan.run.ID); failedStep != "" {
-			fields["failed_step"] = failedStep
-		}
-		addRunPerformanceSummary(m.db, plan.run.ID, fields)
-		telemetry.Track("run", fields)
-		m.autoIngestCIFalseNegatives(runCtx, plan.cfg, plan.run.ID)
-	}()
+	}
+	m.admitRun(sequence, queuedRun{
+		runID: plan.run.ID, repoID: plan.repo.ID, branch: plan.run.Branch,
+		gateDir: plan.gateDir, wtDir: plan.workDir, recovered: true,
+		executor: executor, cancel: cancel, done: done, agent: plan.agent, spawn: spawn,
+	})
 }
 
 func agentListsEqual(a, b []types.AgentName) bool {
@@ -1463,6 +1475,8 @@ func (m *RunManager) withBranchLock(repoID, branch string, action func() (string
 // the repository/branch lock. Proof fields are empty for ordinary launches,
 // and retry is nil for every run that does not continue a failed one.
 func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, inheritedPRURL, planID string, closingIssues []string, retry *retryLaunch, profiles ...*agentcfg.PiProfile) (string, error) {
+	sequence := m.reserveAdmission()
+	defer m.releaseAdmission(sequence)
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -1926,48 +1940,12 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}()
 	}
 
-	// Admission: at most max_concurrent_runs pipelines execute at once. A
-	// submission past the cap is fully set up (row, worktree, trusted
-	// config, agent, pinned gates) and then waits in submission order with
-	// its DB row pending, which is the visible queued state: pending never
-	// holds a slot. Zero or unset means unlimited, today's behavior. A run
-	// holds its slot until its executor goroutine exits - finishing,
-	// failing, or cancelled - including while parked at an approval gate,
-	// because the daemon already counts a parked run as active everywhere
-	// (DB active is pending-or-running, recovery resumes exactly those
-	// rows, and the executors map holds them).
-	m.mu.Lock()
-	if maxConc := globalCfg.MaxConcurrentRuns; !m.slotFreeLocked(maxConc) {
-		m.runQueue = append(m.runQueue, queuedRun{
-			runID:    run.ID,
-			repoID:   repo.ID,
-			branch:   branch,
-			gateDir:  gateDir,
-			wtDir:    wtDir,
-			executor: executor,
-			cancel:   cancel,
-			done:     done,
-			agent:    ag,
-			spawn:    spawn,
-		})
-		m.mu.Unlock()
-
-		// The queue owns cleanup from here on: cancellation removes the
-		// entry and releases the setup, the pump starts it in turn.
-		bgOwnsWorktree = true
-
-		slog.Info("run queued behind max_concurrent_runs cap", "run_id", run.ID, "branch", branch)
-		return run.ID, nil
-	}
-	m.executors[run.ID] = executor
-	m.cancels[run.ID] = cancel
-	m.dones[run.ID] = done
-	m.mu.Unlock()
-
-	// Background goroutine now owns worktree cleanup.
 	bgOwnsWorktree = true
-
-	spawn()
+	m.admitRun(sequence, queuedRun{
+		runID: run.ID, repoID: repo.ID, branch: branch,
+		gateDir: gateDir, wtDir: wtDir,
+		executor: executor, cancel: cancel, done: done, agent: ag, spawn: spawn,
+	})
 
 	return run.ID, nil
 }
@@ -2322,16 +2300,13 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 func (m *RunManager) Shutdown() {
 	m.shuttingDown.Store(true)
 
-	// Queued runs never started and have no executor to resume them after a
-	// restart, so they are recorded cancelled now instead of failing as
-	// stale at the next startup.
 	m.mu.Lock()
 	var queued []queuedRun
 	queued = append(queued, m.runQueue...)
 	m.runQueue = nil
 	m.mu.Unlock()
 	for _, qe := range queued {
-		m.cancelQueuedRun(qe, "daemon shutting down")
+		m.shutdownQueuedRun(qe)
 	}
 
 	m.mu.Lock()

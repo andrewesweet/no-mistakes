@@ -640,7 +640,7 @@ Opt-in cap on how many pipeline runs execute at once on this machine. When the c
 | Range   | `0` or greater         |
 | Default | `0` (unlimited)        |
 
-`0` or unset means unlimited, which is today's behavior. A run holds its slot until its executor finishes, fails, or is cancelled, including while parked at an approval gate: a parked run is still an active run everywhere the daemon counts them. Cancelling a queued run removes it from the queue without ever starting it. Queued runs do not survive a daemon restart: like any run that never reached execution, they are settled as stale at startup and must be resubmitted. It is global-only: repository config cannot set it.
+`0` or unset means unlimited, which is today's behavior. A run holds its slot until its executor finishes, fails, or is cancelled, including while parked at an approval gate: a parked run is still an active run everywhere the daemon counts them. Recovered parked runs use the same cap and wait for a slot before resuming. Cancelling a queued run removes it from the queue without starting it. Fresh queued runs do not survive a daemon restart and must be resubmitted. Recovered parked runs waiting for a slot remain recoverable across a clean shutdown. If the global configuration cannot be read, the daemon keeps the last successfully loaded cap. It is global-only: repository config cannot set it.
 
 ### agent_timeout
 
