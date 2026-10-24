@@ -1,9 +1,9 @@
 package eval
 
 import (
-	"path/filepath"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/findmatch"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -12,8 +12,6 @@ const (
 	matchExactText       = "exact-text"
 	matchLocation        = "location"
 	matchContainment     = "containment"
-	locationLineBand     = 3
-	locationJaccardMin   = 0.5
 	containmentMinTokens = 8
 )
 
@@ -303,19 +301,14 @@ func exactTextMatch(gold FindingGold, finding types.Finding) bool {
 	return goldFile == candFile && goldDesc == candDesc
 }
 
+// locationMatch adapts the eval gold/candidate shapes onto the shared
+// matcher in internal/findmatch, which the pipeline's restatement annotation
+// also uses, so both consumers weight "same issue, same place" identically.
 func locationMatch(gold FindingGold, finding types.Finding) bool {
-	goldFile, goldDesc := normalizeIssue(gold.File, gold.Description)
-	candFile, candDesc := normalizeIssue(finding.File, finding.Description)
-	if goldFile == "" || candFile == "" || goldDesc == "" || candDesc == "" {
-		return false
-	}
-	if goldFile != candFile || gold.Line <= 0 || finding.Line <= 0 {
-		return false
-	}
-	if absInt(gold.Line-finding.Line) > locationLineBand {
-		return false
-	}
-	return tokenJaccard(goldDesc, candDesc) >= locationJaccardMin
+	return findmatch.LocationMatch(
+		findmatch.Finding{File: gold.File, Line: gold.Line, Description: gold.Description},
+		findmatch.Finding{File: finding.File, Line: finding.Line, Description: finding.Description},
+	)
 }
 
 func containmentMatch(gold FindingGold, finding types.Finding) bool {
@@ -337,42 +330,6 @@ func containmentMatch(gold FindingGold, finding types.Finding) bool {
 	return len(strings.Fields(shorter)) >= containmentMinTokens
 }
 
-func tokenJaccard(a, b string) float64 {
-	left := uniqueTokens(a)
-	right := uniqueTokens(b)
-	if len(left) == 0 && len(right) == 0 {
-		return 0
-	}
-	inter := 0
-	for tok := range left {
-		if right[tok] {
-			inter++
-		}
-	}
-	union := len(left) + len(right) - inter
-	if union == 0 {
-		return 0
-	}
-	return float64(inter) / float64(union)
-}
-
-func uniqueTokens(s string) map[string]bool {
-	out := map[string]bool{}
-	for _, tok := range strings.Fields(s) {
-		out[tok] = true
-	}
-	return out
-}
-
 func normalizeIssue(file, description string) (string, string) {
-	file = filepath.ToSlash(strings.TrimSpace(file))
-	description = strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(description))), " ")
-	return file, description
-}
-
-func absInt(n int) int {
-	if n < 0 {
-		return -n
-	}
-	return n
+	return findmatch.NormalizeIssue(file, description)
 }

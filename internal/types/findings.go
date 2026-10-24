@@ -218,6 +218,15 @@ type Finding struct {
 	// (OriginOrDefault), so the fail-safe direction keeps the finding
 	// blocking exactly as today and pre-existing is ever only a grouping.
 	Origin string `json:"origin,omitempty"`
+	// PossibleRestatementOf is pipeline-written provenance naming, by ID, an
+	// earlier outstanding finding that this row may be a reworded restatement
+	// of (same file, nearby line, overlapping description - see
+	// internal/findmatch). The row is never merged or dropped: a distinct
+	// nearby defect must stay visible, so the annotation only explains why a
+	// row looks familiar. Agents never write it (it is absent from the review
+	// schema); identity comparisons (the pipeline's findingKey) ignore it, so
+	// an annotated row restated verbatim still folds back onto itself.
+	PossibleRestatementOf string `json:"possible_restatement_of,omitempty"`
 	// Category separates the combined document+lint housekeeping pass's
 	// findings into their owning gates and the CI step's findings by kind
 	// (see the FindingCategoryCI* constants). Empty everywhere else.
@@ -286,20 +295,21 @@ type TestArtifact struct {
 }
 
 type findingWire struct {
-	ID                  string `json:"id,omitempty"`
-	Severity            string `json:"severity"`
-	File                string `json:"file,omitempty"`
-	Line                int    `json:"line,omitempty"`
-	Description         string `json:"description"`
-	Action              string `json:"action"`
-	Source              string `json:"source,omitempty"`
-	UserInstructions    string `json:"user_instructions,omitempty"`
-	ReviewScope         string `json:"review_scope,omitempty"`
-	Origin              string `json:"origin,omitempty"`
-	Category            string `json:"category,omitempty"`
-	Check               string `json:"check,omitempty"`
-	CheckID             string `json:"check_id,omitempty"`
-	RequiresHumanReview *bool  `json:"requires_human_review,omitempty"`
+	ID                    string `json:"id,omitempty"`
+	Severity              string `json:"severity"`
+	File                  string `json:"file,omitempty"`
+	Line                  int    `json:"line,omitempty"`
+	Description           string `json:"description"`
+	Action                string `json:"action"`
+	Source                string `json:"source,omitempty"`
+	UserInstructions      string `json:"user_instructions,omitempty"`
+	ReviewScope           string `json:"review_scope,omitempty"`
+	Origin                string `json:"origin,omitempty"`
+	PossibleRestatementOf string `json:"possible_restatement_of,omitempty"`
+	Category              string `json:"category,omitempty"`
+	Check                 string `json:"check,omitempty"`
+	CheckID               string `json:"check_id,omitempty"`
+	RequiresHumanReview   *bool  `json:"requires_human_review,omitempty"`
 }
 
 // WithdrawnFinding is one carried finding an answer round retracted, naming
@@ -684,6 +694,7 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	f.UserInstructions = wire.UserInstructions
 	f.ReviewScope = wire.ReviewScope
 	f.Origin = wire.Origin
+	f.PossibleRestatementOf = wire.PossibleRestatementOf
 	f.Category = wire.Category
 	f.Check = wire.Check
 	f.CheckID = wire.CheckID

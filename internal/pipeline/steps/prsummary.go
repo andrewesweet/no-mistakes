@@ -1588,7 +1588,14 @@ func writeFindingBullet(b *strings.Builder, f types.Finding, flavor prBodyFlavor
 		}
 		loc += "` - "
 	}
-	b.WriteString(fmt.Sprintf("- %s %s%s\n", emoji, loc, escapePRText(f.Description, flavor)))
+	description := f.Description
+	if f.PossibleRestatementOf != "" {
+		// Pipeline-written provenance from the outstanding-finding merge: the
+		// row may be a reworded restatement of the named earlier finding. A
+		// note, not a merge - a distinct nearby defect must stay visible.
+		description += fmt.Sprintf(" (possible restatement of %s)", f.PossibleRestatementOf)
+	}
+	b.WriteString(fmt.Sprintf("- %s %s%s\n", emoji, loc, escapePRText(description, flavor)))
 }
 
 // writeTestedDetails lists what the test step exercised: its live-validation

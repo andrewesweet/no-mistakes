@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -150,5 +151,47 @@ func TestTUIFindingIsPreExisting(t *testing.T) {
 	}
 	if (finding{Origin: ""}).IsPreExisting() || (finding{Origin: "legacy"}).IsPreExisting() {
 		t.Fatal("missing or unknown origin must stay in the introduced group")
+	}
+}
+
+func TestRenderFindings_OriginHeadersFitContentWidth(t *testing.T) {
+	raw, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{
+		{ID: "review-1", Severity: "warning", File: "internal/pipeline/steps/review.go", Line: 100, Description: "earlier finding", Origin: types.FindingOriginPreExisting},
+		{ID: "review-2", Severity: "warning", File: "internal/pipeline/steps/review.go", Line: 102, Description: "nearby defect", PossibleRestatementOf: "review-1"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, width := range []int{16, 20, 24, 28, 30, 36, 38, 40, 76} {
+		for _, cursor := range []int{0, 1} {
+			t.Run(fmt.Sprintf("width=%d/cursor=%d", width, cursor), func(t *testing.T) {
+				viewport, _ := renderFindingsWithSelection(raw, width, cursor, nil, 0)
+				window, _ := renderFindingsWithSelection(raw, width, cursor, nil, 1)
+				height, _ := renderFindingsWithSelectionHeight(raw, width, cursor, nil, 100)
+				limited, _ := renderFindingsWithSelectionHeight(raw, width, cursor, nil, 8)
+				for renderer, content := range map[string]string{"viewport": viewport, "window": window, "height": height, "limited": limited} {
+					for _, line := range strings.Split(content, "\n") {
+						if got := lipgloss.Width(line); got > width {
+							t.Fatalf("%s line exceeds %d columns (%d): %q", renderer, width, got, line)
+						}
+					}
+					if renderer == "limited" {
+						if lipgloss.Height(strings.TrimRight(content, "\n")) > 8 {
+							t.Fatalf("height-limited output exceeds eight lines: %q", content)
+						}
+						continue
+					}
+					normalized := strings.Join(strings.Fields(stripANSI(content)), " ")
+					for _, header := range []string{"── Pre-existing (outside this change) ──", "── Introduced by this change ──"} {
+						if renderer == "window" && (cursor != 0 || strings.Contains(header, "Introduced")) {
+							continue
+						}
+						if !strings.Contains(normalized, header) {
+							t.Fatalf("%s lost origin header %q: %s", renderer, header, content)
+						}
+					}
+				}
+			})
+		}
 	}
 }
