@@ -617,6 +617,26 @@ func TestClaudeRetryClassifier_ReportedAPIErrorDecidesAlone(t *testing.T) {
 			err:  claudeExitError(context.Canceled, "", &claudeAPIError{Status: 529, Message: "API Error: 529"}, ""),
 		},
 		{
+			name: "authentication status outranks timeout text",
+			err:  claudeExitError(exit, "", &claudeAPIError{Status: 401, Message: "Request timed out"}, ""),
+		},
+		{
+			name: "usage limit outranks timeout text",
+			err:  claudeExitError(exit, "", &claudeAPIError{Message: "Request timed out", usageLimitReached: true}, ""),
+		},
+		{
+			name: "quota diagnostic outranks timeout text",
+			err:  claudeExitError(exit, "", &claudeAPIError{Message: "Request timed out: quota exceeded"}, ""),
+		},
+		{
+			name: "cancellation outranks timeout text",
+			err:  claudeExitError(context.Canceled, "", &claudeAPIError{Message: "Request timed out"}, ""),
+		},
+		{
+			name: "deadline outranks timeout text",
+			err:  claudeExitError(context.DeadlineExceeded, "", &claudeAPIError{Message: "Request timed out"}, ""),
+		},
+		{
 			name:      "stderr alone",
 			err:       claudeExitError(exit, "HTTP 529 from api.anthropic.com", nil, ""),
 			wantLabel: "http 529",

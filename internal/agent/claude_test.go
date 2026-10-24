@@ -854,13 +854,16 @@ func TestClaudeAgent_RetriesEAIAGAINThenSucceeds(t *testing.T) {
 func TestClaudeAgent_RetriesTerminalNetworkErrors(t *testing.T) {
 	defer withFastBackoff(t)()
 
-	// Oracle: Claude Code 2.1.301's recorded DNS failure ends with is_error,
+	// Oracle: Claude Code 2.1.301's recorded network failures end with is_error,
 	// terminal_reason=api_error and a null api_error_status. Replaying that
 	// protocol must retry; dropping its result text used to stop at attempt 1.
-	for _, code := range []string{"EAI_AGAIN", "ENOTFOUND", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT"} {
+	for _, code := range []string{"EAI_AGAIN", "ENOTFOUND", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "Request timed out"} {
 		for _, mode := range []string{"fresh", "resume", "exhausted", "permanent"} {
 			t.Run(code+"/"+mode, func(t *testing.T) {
 				message := "API Error: Can't reach the API server — check your internet or DNS (" + code + ")"
+				if code == "Request timed out" {
+					message = code
+				}
 				status := "null"
 				if mode == "permanent" {
 					status = "400"

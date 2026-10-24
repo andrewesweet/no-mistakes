@@ -182,6 +182,7 @@ var transientNeedles = []struct {
 	{"connection refused", "connection refused"},
 	{"connection reset", "connection reset"},
 	{"i/o timeout", "i/o timeout"},
+	{"request timed out", "request timeout"},
 	{"no such host", "dns lookup failed"},
 	{"temporary failure in name resolution", "dns temporary failure"},
 	// The errno-symbol spellings agent CLIs built on Node runtimes print where
