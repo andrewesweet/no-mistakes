@@ -851,6 +851,62 @@ func TestClaudeAgent_RetriesEAIAGAINThenSucceeds(t *testing.T) {
 	}
 }
 
+func TestClaudeAgent_RetriesTerminalNetworkErrors(t *testing.T) {
+	defer withFastBackoff(t)()
+
+	// Oracle: Claude Code 2.1.301's recorded DNS failure ends with is_error,
+	// terminal_reason=api_error and a null api_error_status. Replaying that
+	// protocol must retry; dropping its result text used to stop at attempt 1.
+	for _, code := range []string{"EAI_AGAIN", "ENOTFOUND", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT"} {
+		for _, mode := range []string{"fresh", "resume", "exhausted", "permanent"} {
+			t.Run(code+"/"+mode, func(t *testing.T) {
+				message := "API Error: Can't reach the API server — check your internet or DNS (" + code + ")"
+				status := "null"
+				if mode == "permanent" {
+					status = "400"
+					message = "Invalid request quoting " + code
+				}
+				text, err := json.Marshal(message)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("NM_CLAUDE_STDIN_HELPER", "transient-then-succeed")
+				t.Setenv("NM_CLAUDE_STDIN_COUNT_FILE", filepath.Join(t.TempDir(), "attempts"))
+				t.Setenv("NM_CLAUDE_STDIN_TRANSIENT_REMAIN", "1")
+				t.Setenv("NM_CLAUDE_STDIN_BANNER", `{"type":"result","subtype":"success","is_error":true,"terminal_reason":"api_error","api_error_status":`+status+`,"result":`+string(text)+"}\n")
+				wantAttempts := 2
+				wantFailure := mode == "exhausted" || mode == "permanent"
+				if mode == "exhausted" {
+					t.Setenv("NM_CLAUDE_STDIN_TRANSIENT_REMAIN", "10")
+					wantAttempts = 4 // Initial invocation plus three bounded retries.
+				} else if mode == "permanent" {
+					wantAttempts = 1
+				}
+				attempts := 0
+				opts := RunOpts{
+					Prompt:    "review",
+					CWD:       t.TempDir(),
+					OnAttempt: func(Attempt) { attempts++ },
+				}
+				if mode == "resume" {
+					opts.Session = &SessionRef{ID: "helper-session"}
+				}
+				res, err := newClaudeStdinHelperAgent(t).Run(context.Background(), opts)
+				if attempts != wantAttempts {
+					t.Errorf("attempts = %d, want %d", attempts, wantAttempts)
+				}
+				if wantFailure {
+					if err == nil || !strings.Contains(err.Error(), message) {
+						t.Fatalf("error = %v, want terminal diagnostic %q", err, message)
+					}
+				} else if err != nil || res == nil || string(res.Output) != `{"ok":true}` {
+					t.Fatalf("Run = %+v, %v, want recovered structured output", res, err)
+				}
+			})
+		}
+	}
+}
+
 func TestClaudeAgent_NonzeroExitAfterUsableResultFinalizesIt(t *testing.T) {
 	t.Setenv("NM_CLAUDE_STDIN_HELPER", "result-then-fail")
 	a := newClaudeStdinHelperAgent(t)
