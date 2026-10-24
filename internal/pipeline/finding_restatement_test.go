@@ -185,3 +185,36 @@ func TestAnnotationSurvivesThePersistAndRecoveryPath(t *testing.T) {
 		t.Fatalf("retainFindingIDsByIdentity = %v, want [review-2]: the recorded selection must still alias its annotated row", kept)
 	}
 }
+
+func TestMergeOutstandingFindingsJSON_ClearsRemovedRestatementAnchorsBeforeIDReuse(t *testing.T) {
+	outstanding := mergeOutstandingFindingsJSON(restatementOutstanding, restatementRound, []string{"a.go"})
+	reusedID := `{"findings":[{"id":"review-1","severity":"error","file":"b.go","line":5,"description":"unchecked error return in Save","action":"auto-fix"}]}`
+	remaining := resolveVerifiedFindingsJSON(outstanding, []string{"review-1"}, []string{"a.go"}, []string{"a.go", "b.go"}, reusedID)
+	parsed, err := types.ParseFindingsJSON(remaining)
+	if err != nil || len(parsed.Items) != 1 || parsed.Items[0].ID != "review-2" {
+		t.Fatalf("positive verification must clear only the selected anchor: %s (%v)", remaining, err)
+	}
+	for _, tc := range []struct {
+		name  string
+		round string
+	}{
+		{"reused ID", reusedID},
+		{"empty round", ""},
+		{"empty findings", `{"findings":[]}`},
+		{"exact restatement", restatementRound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			merged := mergeOutstandingFindingsJSON(remaining, tc.round, []string{"a.go"})
+			row := restatementMergedItem(t, merged, "review-2")
+			if row.PossibleRestatementOf != "" {
+				t.Fatalf("surviving row points to a cleared anchor: %+v", row)
+			}
+			if tc.round == reusedID {
+				replacement := restatementMergedItem(t, merged, "review-1")
+				if replacement.File != "b.go" || replacement.PossibleRestatementOf != "" {
+					t.Fatalf("freed ID must belong to the unrelated new row: %+v", replacement)
+				}
+			}
+		})
+	}
+}

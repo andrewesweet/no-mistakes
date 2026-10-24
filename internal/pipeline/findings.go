@@ -672,6 +672,7 @@ func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, rev
 // with the earlier finding's ID so the gate reads it as a possible
 // restatement instead of an unrelated new row.
 func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string, reviewedPaths []string) string {
+	existingRaw, additionalRaw = annotatePossibleRestatements(existingRaw, additionalRaw)
 	if additionalRaw == "" {
 		if existingRaw == "" {
 			return ""
@@ -688,7 +689,7 @@ func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string, reviewedPat
 		}
 		return encoded
 	}
-	mergedRaw := mergeFindingsJSON(existingRaw, annotatePossibleRestatements(existingRaw, additionalRaw))
+	mergedRaw := mergeFindingsJSON(existingRaw, additionalRaw)
 	current, currentErr := types.ParseFindingsJSON(additionalRaw)
 	if mergedRaw == "" && currentErr == nil {
 		// Empty finding sets still carry the current round's positive coverage
@@ -743,17 +744,37 @@ func nextFreeReviewFindingID(seen map[string]bool) string {
 // skipped - there is no second row to explain. Matching is best-effort: any
 // parse or marshal failure returns the round unchanged, because the
 // annotation explains a row and must never change the merge's outcome.
-func annotatePossibleRestatements(existingRaw, additionalRaw string) string {
-	if existingRaw == "" || additionalRaw == "" {
-		return additionalRaw
+func annotatePossibleRestatements(existingRaw, additionalRaw string) (string, string) {
+	if existingRaw == "" {
+		return existingRaw, additionalRaw
 	}
 	existing, err := types.ParseFindingsJSON(existingRaw)
 	if err != nil {
-		return additionalRaw
+		return existingRaw, additionalRaw
+	}
+	anchors := make(map[string]bool, len(existing.Items))
+	for _, item := range existing.Items {
+		if item.ID != "" {
+			anchors[item.ID] = true
+		}
+	}
+	cleared := false
+	for i, item := range existing.Items {
+		if item.PossibleRestatementOf != "" && !anchors[item.PossibleRestatementOf] {
+			existing.Items[i].PossibleRestatementOf = ""
+			cleared = true
+		}
+	}
+	if cleared {
+		encoded, err := types.MarshalFindingsJSON(existing)
+		if err != nil {
+			return existingRaw, additionalRaw
+		}
+		existingRaw = encoded
 	}
 	current, err := types.ParseFindingsJSON(additionalRaw)
 	if err != nil {
-		return additionalRaw
+		return existingRaw, additionalRaw
 	}
 	exact := make(map[types.Finding]bool, len(existing.Items))
 	for _, item := range existing.Items {
@@ -781,13 +802,13 @@ func annotatePossibleRestatements(existingRaw, additionalRaw string) string {
 		annotated = true
 	}
 	if !annotated {
-		return additionalRaw
+		return existingRaw, additionalRaw
 	}
 	encoded, err := types.MarshalFindingsJSON(current)
 	if err != nil {
-		return additionalRaw
+		return existingRaw, additionalRaw
 	}
-	return encoded
+	return existingRaw, encoded
 }
 
 // bestRestatementAnchor names the outstanding finding the candidate most

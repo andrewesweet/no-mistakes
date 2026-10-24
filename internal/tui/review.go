@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	nmtypes "github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -323,8 +324,14 @@ func renderFindingsRange(f *findings, width int, cursor int, selected map[string
 		// restatement of an earlier finding: the tag names the anchor so the
 		// row reads as "maybe the same defect again", never merged away.
 		if item.PossibleRestatementOf != "" {
-			line += " " + dimStyle.Render(fmt.Sprintf("[possible restatement of %s]", item.PossibleRestatementOf))
+			tag := fmt.Sprintf("[possible restatement of %s]", item.PossibleRestatementOf)
+			if width > 0 && lipgloss.Width(line)+1+lipgloss.Width(tag) > width {
+				line += "\n" + dimStyle.Render(wrapIndentedText(tag, width, 8))
+			} else {
+				line += " " + dimStyle.Render(tag)
+			}
 		}
+		line = ansi.Wrap(line, width, "")
 
 		// File:line reference, truncated to fit within content width.
 		if item.File != "" {
@@ -332,10 +339,14 @@ func renderFindingsRange(f *findings, width int, cursor int, selected map[string
 			if item.Line > 0 {
 				ref = fmt.Sprintf("%s:%d", item.File, item.Line)
 			}
-			// Gutter prefix: cursor(1) + sp(1) + checkbox(3) + sp(1) + icon(1) + sp(1) = 8
-			maxRefWidth := width - 8 - 1 // -1 for space before ref
+			prefix := line[strings.LastIndex(line, "\n")+1:]
+			maxRefWidth := width - lipgloss.Width(prefix) - 1
+			if width > 8 && maxRefWidth <= 0 {
+				line += "\n       "
+				maxRefWidth = width - 8
+			}
 			if maxRefWidth > 0 && lipgloss.Width(ref) > maxRefWidth {
-				ref, _ = cutText(ref, maxRefWidth)
+				ref = ansi.Truncate(ref, maxRefWidth, "")
 			}
 			if idx == cursor {
 				line += " " + ref
