@@ -10,6 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/testguidance"
@@ -263,7 +264,7 @@ Previous review findings to address:
 	if err != nil {
 		return nil, err
 	}
-	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + planSection + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction
+	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + rereviewFocusSection(sctx) + userIntentPromptSection(sctx) + planSection + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction
 
 	// Path-scoped review guidance, taken from the operator's global config and
 	// from the trusted default-branch config copy (regardless of
@@ -932,6 +933,93 @@ Fix-round provenance:
 - When a defect you report is in code a prior fix round changed, or is a sibling site of an invariant a prior fix round addressed, say so in the description: name the round, and whether that fix introduced the defect, left this sibling behind, or moved the defect. List every remaining sibling site so one fix round can close the class.
 - When the defects you are reporting are located in code a prior fix round introduced, and that code exceeds what the original finding required, report a single "ask-user" finding recommending that the prior round be reverted to the minimal fix, instead of filing further repairs on that machinery.
 `, fromSHA, toSHA)
+}
+
+// maxRereviewFocusStatLines bounds the rereview focus section's diff summary.
+// A branch with thousands of changed files would otherwise turn this focus
+// aid into the prompt's largest block; the per-path review duty itself is
+// owned by reviewCoverageSection and enforced by the coverage gate, so the
+// cap only bounds guidance, never the certification.
+const maxRereviewFocusStatLines = 200
+
+// rereviewFocusSection names the head this step's previous round already
+// reviewed and summarizes what changed since it, so a fix-round rereview
+// looks there first while still reviewing the complete change. Without it the
+// rereview re-enters the whole diff cold: a late finding on long-reviewed
+// code reads as new, and each one can fund another fix round - exactly the
+// churn the measured runs showed (58-65% of rereviews reporting a site a
+// prior fix left behind or moved).
+//
+// The coverage contract is deliberately untouched: the complete change is
+// still reviewed, and reviewed_paths must still certify every reviewable path.
+// An initial review has no prior round to name and returns "" - today's prompt,
+// byte-identical. Emitted only on a fixing rerun with a prior reviewed head.
+// Fail-open: a rounds or git failure drops the section rather than failing
+// the step, because it is attention guidance, not evidence.
+func rereviewFocusSection(sctx *pipeline.StepContext) string {
+	if sctx == nil || !sctx.Fixing || sctx.DB == nil || sctx.StepResultID == "" || sctx.Run == nil {
+		return ""
+	}
+	rounds, err := sctx.DB.GetRoundsByStep(sctx.StepResultID)
+	if err != nil {
+		return ""
+	}
+	// The most recent round that captured a reviewed head. Rounds are ordered
+	// by number, and the round currently executing is not among them: the
+	// executor persists it only after this Execute returns.
+	var prior *db.StepRound
+	for _, r := range rounds {
+		if r == nil || r.ReviewedHeadSHA == nil || strings.TrimSpace(*r.ReviewedHeadSHA) == "" {
+			continue
+		}
+		prior = r
+	}
+	if prior == nil {
+		return ""
+	}
+	prevHead := strings.TrimSpace(*prior.ReviewedHeadSHA)
+	head := strings.TrimSpace(sctx.Run.HeadSHA)
+	if head == "" {
+		return ""
+	}
+	stat, err := git.Run(sctx.Ctx, sctx.WorkDir, "diff", "--stat", prevHead, head)
+	if err != nil {
+		sctx.Log(fmt.Sprintf("rereview focus section unavailable: git diff --stat failed: %v", err))
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\nRereview focus:\n")
+	fmt.Fprintf(&b, "- Round %d of this step reviewed head %s. Code unchanged since that head was already judged by that review; code after it has never been reviewed.\n", prior.Round, prevHead)
+	fmt.Fprintf(&b, "- Changes since that review (git diff --stat %s %s):\n", prevHead, head)
+	b.WriteString(truncateRereviewFocusStat(sanitizePromptMultilineText(stat)))
+	b.WriteString("- Review the complete change exactly as before: unchanged files still need your judgment, and reviewed_paths must still list every changed file you actually read and judged.\n")
+	b.WriteString("- Look first at the files listed above; defects are most likely in the code no review has covered yet.\n")
+	fmt.Fprintf(&b, "- When a finding sits on code unchanged since that review, add \"present at round %d's review\" to its description as an exact suffix preceded by a space, so the gate operator can tell long-reviewed code from new code at a glance.\n", prior.Round)
+	return b.String()
+}
+
+// truncateRereviewFocusStat bounds the sanitized diff summary and discloses
+// the cut, mirroring the bounded round-history sections. An empty summary -
+// the head unchanged since the prior review, as on an answer round or a no-op
+// fix round - says so explicitly instead of leaving a nameless blank block.
+func truncateRereviewFocusStat(stat string) string {
+	if strings.TrimSpace(stat) == "" {
+		return "  (no files changed since that review)\n"
+	}
+	lines := strings.Split(strings.TrimRight(stat, "\n"), "\n")
+	omitted := 0
+	if len(lines) > maxRereviewFocusStatLines {
+		omitted = len(lines) - maxRereviewFocusStatLines
+		lines = lines[:maxRereviewFocusStatLines]
+	}
+	var b strings.Builder
+	for _, line := range lines {
+		fmt.Fprintf(&b, "  %s\n", line)
+	}
+	if omitted > 0 {
+		fmt.Fprintf(&b, "  ... (%d more line(s) omitted for length; the complete changed-file list is under \"Changed files this review is held to\")\n", omitted)
+	}
+	return b.String()
 }
 
 // approvedReviewOutcome captures the immutable commit examined by this full

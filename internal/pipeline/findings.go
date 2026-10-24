@@ -3,6 +3,7 @@ package pipeline
 import (
 	"encoding/json"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -64,6 +65,8 @@ func marshalFindingIDs(ids []string) string {
 	return string(encoded)
 }
 
+var reviewRoundSuffix = regexp.MustCompile(`( present at round [1-9][0-9]*'s review)+$`)
+
 func findingKey(item types.Finding) types.Finding {
 	item.ID = ""
 	item.Action = ""
@@ -74,11 +77,16 @@ func findingKey(item types.Finding) types.Finding {
 	// content-derived, so a relabel must merge onto the outstanding finding
 	// instead of minting a second one for the same defect.
 	item.Origin = ""
+	// The rereview-focus marker is the reviewer's own prose annotation, and a
+	// later round appends or drops it without the defect changing. Strip it at
+	// the shared identity boundary so a marked restatement merges onto the
+	// outstanding finding; mergeFindingsJSON keeps the latest text for display.
+	item.Description = reviewRoundSuffix.ReplaceAllString(item.Description, "")
 	return item
 }
 
 // SameFinding reports whether a and b describe the same finding, ignoring the
-// ID, action, source, and operator instructions a later round may restate.
+// ID, action, source, operator instructions, and trailing review-round markers.
 func SameFinding(a, b types.Finding) bool {
 	return findingKey(a) == findingKey(b)
 }
@@ -183,7 +191,14 @@ func mergeFindingsJSON(existingRaw, additionalRaw string) string {
 			}
 		}
 		if matched {
+			// A restatement that matches an outstanding finding carries the
+			// reviewer's newest wording: keep its origin relabel and its
+			// description (including any rereview-focus "present at round N's
+			// review" annotation) so the retained finding reads as the
+			// reviewer now states it. Identity was compared without those
+			// fields, so this cannot mint a second row for the same defect.
 			merged.Items[index].Origin = item.Origin
+			merged.Items[index].Description = item.Description
 			continue
 		}
 		seen[key] = len(merged.Items)
@@ -640,11 +655,11 @@ func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, rev
 // re-minted instead), and the merged payload carries this round's coverage
 // record rather than the outstanding set's stale copy.
 //
-// Identity is still content-derived: a reworded restatement of an existing
-// finding does not match its original and is appended as a second item. That
-// is accepted rather than fixed here - it over-blocks instead of dropping
-// anything, and stable finding identity is a separate design pass (Parts 2+3
-// of the scout report).
+// Identity is still content-derived (see SameFinding for exclusions): a
+// substantively reworded restatement does not match its original and is
+// appended as a second item. That is accepted rather than fixed here - it
+// over-blocks instead of dropping anything, and stable finding identity is a
+// separate design pass (Parts 2+3 of the scout report).
 func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string, reviewedPaths []string) string {
 	if additionalRaw == "" {
 		if existingRaw == "" {
