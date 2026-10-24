@@ -13,6 +13,7 @@ import (
 type drainStep struct {
 	started chan struct{}
 	release chan struct{}
+	outcome *pipeline.StepOutcome
 }
 
 func (*drainStep) Name() types.StepName { return types.StepDocument }
@@ -20,6 +21,9 @@ func (s *drainStep) Execute(ctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	close(s.started)
 	select {
 	case <-s.release:
+		if s.outcome != nil {
+			return s.outcome, nil
+		}
 		return &pipeline.StepOutcome{ExitCode: 0}, nil
 	case <-ctx.Ctx.Done():
 		return nil, context.Cause(ctx.Ctx)

@@ -127,7 +127,7 @@ reason about in one long-lived process than inside independent hook invocations.
 
 ## Crash recovery
 
-A clean stop (`SIGTERM`, `daemon stop`, `daemon restart`) leaves a run that is fully recorded as waiting at an approval gate exactly as a crash would, so the next start resumes it at that gate. A clean stop still fails a run that is in the middle of a step.
+A clean stop (`SIGTERM`, `daemon stop`, `daemon restart`) gives executing steps up to 30 seconds to finish or reach an approval gate. A run fully recorded as waiting at an approval gate keeps its record, worktree, and evidence, so the next start resumes it at that gate. A step still executing when the grace period expires is cancelled and its run fails with `daemon shutting down`. Interrupted steps do not resume.
 
 On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon stopped while they were active):
 
@@ -170,6 +170,11 @@ The [starting and stopping](#starting-and-stopping) section owns the active-run
 guard, the top-level `--force` override, and the separate validation-step
 containment rule.
 
-1. Cancels all active runs, except that a run fully recorded as waiting at an approval gate keeps its record and worktree so the next start resumes it (see [Crash recovery](#crash-recovery))
-2. Waits up to 30 seconds for goroutines to finish
-3. Removes the PID file and socket
+When shutdown begins, the daemon:
+
+1. Refuses new runs and stops starting subsequent pipeline steps.
+2. Gives executing steps up to 30 seconds to finish. Runs that reach an approval gate stay parked for [startup recovery](#crash-recovery); a run whose final step finishes completes normally. If a step finishes but more steps remain, the run fails without starting the next step.
+3. Cancels work still executing at the deadline with `daemon shutting down`, then waits up to 30 seconds for cancellation cleanup.
+4. Removes the PID file and socket.
+
+The stop command and managed service give the daemon enough time for both phases before falling back to a hard kill. On systemd, the initial stop signal goes only to the daemon, so its agent subprocesses can drain; remaining children are killed at the service stop deadline. `SIGKILL` and an OOM kill cannot run the drain and retain their existing crash-recovery behavior.

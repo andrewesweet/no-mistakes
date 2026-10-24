@@ -272,10 +272,10 @@ func startTestDaemonWithSteps(t *testing.T, sf StepFactory) (*paths.Paths, *db.D
 	}
 	t.Cleanup(func() { d.Close() })
 
-	// A run reaches its terminal DB state before its goroutine finishes git
-	// worktree cleanup. On process-spawn-bound Windows that cleanup can take
-	// longer than three seconds, so give graceful shutdown its own budget.
-	runTestDaemon(t, p, d, sf, 15*time.Second)
+	// Slow fixture steps deliberately wait for cancellation, so shutdown must
+	// first exhaust its drain grace. Then allow the cancellation cleanup and
+	// IPC teardown budgets before releasing the fixture database and root.
+	runTestDaemon(t, p, d, sf, daemonShutdownTimeout+10*time.Second)
 	return p, d
 }
 

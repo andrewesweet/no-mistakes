@@ -81,6 +81,9 @@ type Executor struct {
 	crashRetryBaseSHA   string
 	crashRetryRecovered bool
 
+	drainOnce sync.Once
+	drainCh   chan struct{}
+
 	mu                     sync.Mutex
 	approvalCh             chan approvalResponse  // buffered channel for approval responses
 	waiting                bool                   // true when blocked on approval
@@ -103,6 +106,23 @@ type Executor struct {
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
 	onPRMerged            func(context.Context, string)
+}
+
+// BeginDrain lets an executing step finish but prevents another step from
+// starting. Existing approval gates are left parked, never approved by shutdown.
+func (e *Executor) BeginDrain() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.drainOnce.Do(func() { close(e.drainCh) })
+}
+
+func (e *Executor) draining() bool {
+	select {
+	case <-e.drainCh:
+		return true
+	default:
+		return false
+	}
 }
 
 // SetOnPRMerged registers a best-effort hook invoked after a merged PR state
@@ -154,6 +174,7 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 		steps:                 steps,
 		onEvent:               onEvent,
 		approvalCh:            make(chan approvalResponse, 1),
+		drainCh:               make(chan struct{}),
 		gateReconcileInterval: defaultGateReconcileInterval,
 		gateReconcileTimeout:  defaultGateReconcileTimeout,
 	}
@@ -254,6 +275,10 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		return RespondDispositions{}, fmt.Errorf("unrecognized approval action %q (valid: approve, fix, skip, abort, answer)", action)
 	}
 	e.mu.Lock()
+	if e.draining() {
+		e.mu.Unlock()
+		return RespondDispositions{}, fmt.Errorf("daemon is shutting down")
+	}
 	if !e.waiting {
 		e.mu.Unlock()
 		return RespondDispositions{}, fmt.Errorf("no step awaiting approval")
@@ -711,6 +736,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if err != nil {
 		return err
 	}
+	if e.draining() {
+		return ErrParkedAtShutdown
+	}
 	if err := e.validateSkippedReview(run, repo); err != nil {
 		return e.failRun(run, repo, err, ctx)
 	}
@@ -813,7 +841,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	)
 
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
-	if errors.Is(err, ErrDaemonShutdown) {
+	if errors.Is(err, ErrDaemonShutdown) || (err == nil && e.draining()) {
 		return ErrParkedAtShutdown
 	}
 	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
@@ -1179,6 +1207,9 @@ func (e *Executor) autoFixLimit(stepName types.StepName) int {
 // Returns whether to skip the remainder, an optional earlier restart step,
 // and any execution error.
 func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult, run *db.Run, repo *db.Repo, workDir, logDir string, state stepExecutionState) (bool, types.StepName, error) {
+	if e.draining() {
+		return false, "", ErrDaemonShutdown
+	}
 	stepName := step.Name()
 	logPath := filepath.Join(logDir, string(stepName)+".log")
 	finalExitCode := 0
@@ -1702,7 +1733,7 @@ rounds:
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), effectiveFindings, "", &executionMS)
 
 			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true)
-			if errors.Is(err, ErrDaemonShutdown) {
+			if errors.Is(err, ErrDaemonShutdown) || (err == nil && e.draining()) {
 				return false, "", ErrParkedAtShutdown
 			}
 			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
@@ -2255,12 +2286,20 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 		}
 	}()
 
+	if ctx.Err() != nil {
+		return approvalResponse{}, false, context.Cause(ctx)
+	}
+	if e.draining() {
+		return approvalResponse{}, false, ErrDaemonShutdown
+	}
 	_, reconciles := step.(ApprovalGateReconciler)
 	_, resumes := step.(ApprovalGateResumer)
 	if !reconciles && !resumes {
 		select {
 		case response := <-e.approvalCh:
 			return response, false, nil
+		case <-e.drainCh:
+			return approvalResponse{}, false, drainCancellationCause(ctx)
 		case <-ctx.Done():
 			return approvalResponse{}, false, context.Cause(ctx)
 		}
@@ -2278,7 +2317,12 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 			return response, false, nil
 		case <-ctx.Done():
 			return approvalResponse{}, false, context.Cause(ctx)
+		case <-e.drainCh:
+			return approvalResponse{}, false, drainCancellationCause(ctx)
 		case <-timer.C:
+			if e.draining() {
+				return approvalResponse{}, false, drainCancellationCause(ctx)
+			}
 			// A resumer runs first and returns a RESPONSE rather than a
 			// completion, so the gate re-enters its step exactly as it would
 			// for an operator's own action. Claiming the gate here is the same
@@ -2316,6 +2360,15 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 			timer.Reset(e.gateReconcileInterval)
 		}
 	}
+}
+
+// An abort or superseding push that already cancelled the run still wins over
+// a concurrent drain notification, just as it does over deadline cancellation.
+func drainCancellationCause(ctx context.Context) error {
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	return ErrDaemonShutdown
 }
 
 func (e *Executor) claimGateReconciliation() bool {

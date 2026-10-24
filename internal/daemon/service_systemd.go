@@ -124,6 +124,10 @@ Type=simple
 # stop (the default) terminates every process in the service, which is how one
 # step's allocation used to fail every other in-flight run.
 OOMPolicy=continue
+# Signal the daemon first so its current steps can drain; kill remaining children
+# only after the bounded stop deadline.
+KillMode=mixed
+TimeoutStopSec=%d
 ExecStart=%s
 WorkingDirectory=%s
 %s
@@ -134,7 +138,7 @@ RestartSec=2
 
 [Install]
 WantedBy=default.target
-`, command, systemdEscapeArg(p.Root()), strings.Join(envLines, "\n"), systemdEscapeArg("append:"+p.DaemonBootstrapLog()), systemdEscapeArg("append:"+p.DaemonBootstrapLog()))
+`, int(daemonShutdownTimeout.Seconds()), command, systemdEscapeArg(p.Root()), strings.Join(envLines, "\n"), systemdEscapeArg("append:"+p.DaemonBootstrapLog()), systemdEscapeArg("append:"+p.DaemonBootstrapLog()))
 }
 
 // systemdEnvironmentLine renders one `Environment=` directive. systemd runs
