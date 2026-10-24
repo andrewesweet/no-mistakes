@@ -61,6 +61,39 @@ func TestClassifyTransient_Positive(t *testing.T) {
 			wantSub: "dns",
 		},
 		{
+			// The exact failure shape behind the 2026-09-27 EAI_AGAIN incident:
+			// the CLI's plain-text banner on stdout, an empty stderr, and no
+			// result event carrying api_error_status.
+			name:    "claude stdout EAI_AGAIN banner",
+			errMsg:  `claude exited: exit status 1: stdout: API Error: Can't reach the API server — check your internet or DNS (EAI_AGAIN)`,
+			wantSub: "dns",
+		},
+		{
+			name:    "node dns temporary failure errno",
+			errMsg:  `claude exited: exit status 1: getaddrinfo EAI_AGAIN api.anthropic.com`,
+			wantSub: "dns",
+		},
+		{
+			name:    "node dns notfound errno",
+			errMsg:  `codex exited: exit status 1: getaddrinfo ENOTFOUND api.anthropic.com`,
+			wantSub: "dns",
+		},
+		{
+			name:    "node connection refused errno",
+			errMsg:  `codex exited: exit status 1: connect ECONNREFUSED 104.18.32.47:443`,
+			wantSub: "connection refused",
+		},
+		{
+			name:    "node connection reset errno",
+			errMsg:  `pi exited: exit status 1: read ECONNRESET`,
+			wantSub: "connection reset",
+		},
+		{
+			name:    "node connect timeout errno",
+			errMsg:  `grok exited: exit status 1: connect ETIMEDOUT 1.2.3.4:443`,
+			wantSub: "timeout",
+		},
+		{
 			name:    "tls handshake",
 			errMsg:  `Post "https://api.anthropic.com": net/http: TLS handshake timeout`,
 			wantSub: "tls",

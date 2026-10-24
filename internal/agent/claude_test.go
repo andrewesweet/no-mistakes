@@ -782,6 +782,15 @@ func TestClaudeAgent_RetriesOnlyATerminalTransientAPIError(t *testing.T) {
 			wantAttempts: 1,
 			wantErr:      "claude exited: exit status 1: stdout: You've hit your weekly limit \u00b7 resets Jul 9 at 9pm (America/Chicago)",
 		},
+		{
+			// The 2026-09-27 incident shape: the CLI's DNS-failure banner on
+			// stdout, empty stderr, no api_error_status. Transient, so every
+			// bounded attempt runs before the failure surfaces.
+			name:         "EAI_AGAIN banner on stdout",
+			banner:       "API Error: Can't reach the API server — check your internet or DNS (EAI_AGAIN)\n",
+			wantAttempts: claudeMaxRetries + 1,
+			wantErr:      "claude exited: exit status 1: stdout: API Error: Can't reach the API server — check your internet or DNS (EAI_AGAIN)",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := ""
@@ -813,6 +822,32 @@ func TestClaudeAgent_RetriesOnlyATerminalTransientAPIError(t *testing.T) {
 				t.Errorf("error = %q, want %q", err.Error(), tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestClaudeAgent_RetriesEAIAGAINThenSucceeds(t *testing.T) {
+	defer withFastBackoff(t)()
+
+	t.Setenv("NM_CLAUDE_STDIN_HELPER", "transient-then-succeed")
+	t.Setenv("NM_CLAUDE_STDIN_COUNT_FILE", filepath.Join(t.TempDir(), "attempts"))
+	t.Setenv("NM_CLAUDE_STDIN_TRANSIENT_REMAIN", "1")
+	t.Setenv("NM_CLAUDE_STDIN_BANNER", "API Error: Can't reach the API server — check your internet or DNS (EAI_AGAIN)\n")
+	a := newClaudeStdinHelperAgent(t)
+
+	attempts := 0
+	res, err := a.Run(context.Background(), RunOpts{
+		Prompt:    "review",
+		CWD:       t.TempDir(),
+		OnAttempt: func(Attempt) { attempts++ },
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if attempts != 2 {
+		t.Errorf("attempts = %d, want 2 (one transient DNS failure, then success)", attempts)
+	}
+	if res == nil || res.Output == nil {
+		t.Errorf("result = %+v, want the helper's structured output", res)
 	}
 }
 
@@ -994,6 +1029,25 @@ func TestClaudeStdinHelper(t *testing.T) {
 		}
 		_, _ = io.WriteString(os.Stdout, os.Getenv("NM_CLAUDE_STDIN_BANNER"))
 		os.Exit(1)
+	case "transient-then-succeed":
+		// Fails NM_CLAUDE_STDIN_TRANSIENT_REMAIN invocations (banner on stdout,
+		// exit 1), counted through NM_CLAUDE_STDIN_COUNT_FILE because every
+		// retry attempt is a fresh process, then emits a success result.
+		remain := 0
+		if v := os.Getenv("NM_CLAUDE_STDIN_TRANSIENT_REMAIN"); v != "" {
+			remain, _ = strconv.Atoi(v)
+		}
+		count := 0
+		if data, err := os.ReadFile(os.Getenv("NM_CLAUDE_STDIN_COUNT_FILE")); err == nil {
+			count, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+		}
+		if count < remain {
+			_ = os.WriteFile(os.Getenv("NM_CLAUDE_STDIN_COUNT_FILE"), []byte(strconv.Itoa(count+1)), 0o644)
+			_, _ = io.WriteString(os.Stdout, os.Getenv("NM_CLAUDE_STDIN_BANNER"))
+			os.Exit(1)
+		}
+		emitClaudeHelperResult()
+		return
 	case "result-then-fail":
 		emitClaudeHelperResult()
 		os.Exit(1)
