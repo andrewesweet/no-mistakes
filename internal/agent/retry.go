@@ -150,7 +150,8 @@ func cloneSessionRef(session *SessionRef) *SessionRef {
 // claudeRetryClassifier retries both transient API errors and the
 // no-structured-output case that the existing loop already handled. When the
 // CLI reported the API error it ended on, that record alone decides: the
-// message text beside it is not classifier input.
+// reported HTTP status takes precedence; without one, only the record's
+// terminal diagnostic is classified, never surrounding assistant or stderr text.
 func claudeRetryClassifier(err error) (string, bool) {
 	if errors.Is(err, errNoStructuredOutput) {
 		return "missing structured output", true
