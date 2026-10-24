@@ -740,7 +740,19 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if err != nil {
 		return err
 	}
+	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
+	duration := recoveredStepDuration(gate.stepResult)
 	if e.draining() {
+		if cause := drainCancellationCause(ctx); !errors.Is(cause, ErrDaemonShutdown) {
+			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
+				slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
+			}
+			if dbErr := e.db.FailStep(gate.stepResult.ID, cause.Error(), duration); dbErr != nil {
+				slog.Warn("failed to mark recovered step as failed in db", "step", gate.step.Name(), "error", dbErr)
+			}
+			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", cause.Error(), &duration)
+			return e.failRun(run, repo, cause, ctx)
+		}
 		return ErrParkedAtShutdown
 	}
 	if err := e.validateSkippedReview(run, repo); err != nil {
@@ -756,8 +768,6 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.initializeRunScopes(run.ID)
 	e.crashRetryRecovered = true
 
-	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
-	duration := recoveredStepDuration(gate.stepResult)
 	completeRecoveredGate := func() error {
 		if gate.step.Name() == types.StepReview {
 			if gate.reviewedHeadSHA == "" {
@@ -846,7 +856,10 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
 	if errors.Is(err, ErrDaemonShutdown) || (err == nil && e.draining() && response.action != types.ActionAbort) {
-		return ErrParkedAtShutdown
+		err = drainCancellationCause(ctx)
+		if errors.Is(err, ErrDaemonShutdown) {
+			return ErrParkedAtShutdown
+		}
 	}
 	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
@@ -1212,7 +1225,7 @@ func (e *Executor) autoFixLimit(stepName types.StepName) int {
 // and any execution error.
 func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult, run *db.Run, repo *db.Repo, workDir, logDir string, state stepExecutionState) (bool, types.StepName, error) {
 	if e.draining() {
-		return false, "", ErrDaemonShutdown
+		return false, "", drainCancellationCause(ctx)
 	}
 	stepName := step.Name()
 	logPath := filepath.Join(logDir, string(stepName)+".log")
@@ -1738,7 +1751,10 @@ rounds:
 
 			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true)
 			if errors.Is(err, ErrDaemonShutdown) || (err == nil && e.draining() && response.action != types.ActionAbort) {
-				return false, "", ErrParkedAtShutdown
+				err = drainCancellationCause(ctx)
+				if errors.Is(err, ErrDaemonShutdown) {
+					return false, "", ErrParkedAtShutdown
+				}
 			}
 			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
@@ -2297,7 +2313,7 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 		return approvalResponse{}, false, context.Cause(ctx)
 	}
 	if e.draining() {
-		return approvalResponse{}, false, ErrDaemonShutdown
+		return approvalResponse{}, false, drainCancellationCause(ctx)
 	}
 	_, reconciles := step.(ApprovalGateReconciler)
 	_, resumes := step.(ApprovalGateResumer)
