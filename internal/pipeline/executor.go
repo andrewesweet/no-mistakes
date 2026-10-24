@@ -2303,8 +2303,8 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 		e.waitingStep = ""
 		e.waitingFindings = ""
 		e.waitingStepResultID = ""
-		// Drain any stale response that arrived after context cancellation or
-		// raced with an external reconciliation.
+		// Drain stale responses after cancellation or external reconciliation,
+		// but preserve an accepted abort unless a non-shutdown cause already won.
 		select {
 		case queued := <-e.approvalCh:
 			if queued.action == types.ActionAbort && (context.Cause(ctx) == nil || errors.Is(context.Cause(ctx), ErrDaemonShutdown)) {
@@ -2457,6 +2457,7 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 // failRun marks a run as failed and returns the error.
 // It accepts an optional context; if the context was cancelled with a cause,
 // the cause message is used as the run's error (more informative than "context canceled").
+// An accepted gate abort keeps its reason over a shutdown cancellation cause.
 func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
 	if errors.Is(err, ErrParkedAtShutdown) {
 		return err
