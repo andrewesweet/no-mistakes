@@ -297,9 +297,9 @@ func renderFindingsRange(f *findings, width int, cursor int, selected map[string
 			if idx > start {
 				b.WriteString("\n")
 			}
-			b.WriteString(dimStyle.Render("── Pre-existing (outside this change) ──") + "\n")
+			b.WriteString(dimStyle.Render(wrapIndentedText("── Pre-existing (outside this change) ──", width, 0)) + "\n")
 		} else if !preExisting && idx > start && f.Items[idx-1].IsPreExisting() {
-			b.WriteString("\n" + dimStyle.Render("── Introduced by this change ──") + "\n")
+			b.WriteString("\n" + dimStyle.Render(wrapIndentedText("── Introduced by this change ──", width, 0)) + "\n")
 		}
 
 		// Unfocused severity icons are dim to match description/file ref dimming.

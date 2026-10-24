@@ -56,7 +56,7 @@ func TestRenderFindings_TaggedRowsFitContentWidth(t *testing.T) {
 		{name: "all tags", source: types.FindingSourceUser, origin: types.FindingOriginPreExisting, anchor: "review-1"},
 		{name: "long anchor", anchor: "review-" + strings.Repeat("9", 80)},
 	} {
-		for _, width := range []int{40, 41, 55, 56, 76, 120} {
+		for _, width := range []int{30, 36, 40, 41, 55, 56, 76, 120} {
 			for _, file := range []string{"internal/pipeline/steps/review.go", "内部/pipeline/steps/review.go", ""} {
 				t.Run(fmt.Sprintf("%s/%d/%s", tc.name, width, file), func(t *testing.T) {
 					raw, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{
