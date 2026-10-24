@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"fmt"
 	"math/rand"
 	"strings"
 	"testing"
@@ -255,6 +256,57 @@ func TestEvaluationSummaryHeadlinesF1WhenFalsePositiveGoldExists(t *testing.T) {
 	output := RenderReport([]CandidateReport{{Cohort: "c", Summary: summary, RepeatCount: 1}})
 	if !strings.Contains(output, "F1:") || strings.Contains(output, "F1: withheld") {
 		t.Fatalf("report = %q, want headline F1 once false-positive gold exists", output)
+	}
+}
+
+// TestScoreCandidateLocationMatcherBoundaries pins the location-match tier's
+// exact boundary behavior through the public scoring surface. The matcher
+// lives in the shared internal/findmatch package; eval behavior must stay
+// byte-identical across that move, so these edges are pinned here: in-band
+// matches, just-outside-band misses, low-overlap misses, file mismatches,
+// and missing lines all score exactly as before.
+func TestScoreCandidateLocationMatcherBoundaries(t *testing.T) {
+	const desc = "nil map write in Load when cfg is empty"
+	const reworded = "Load writes to a nil map when cfg is empty"
+	const unrelated = "unchecked error return ignored in Save"
+
+	goldAt := func(line int, description string) Labels {
+		return Labels{Findings: []FindingGold{{
+			ID: "gold", Kind: GoldTruePositive,
+			File: "a.go", Line: line, Description: description,
+		}}}
+	}
+	candidateAt := func(line int, description string) string {
+		return fmt.Sprintf(`{"findings":[{"id":"c1","file":"a.go","line":%d,"description":%q}]}`, line, description)
+	}
+
+	tests := []struct {
+		name      string
+		gold      Labels
+		candidate string
+		fuzzy     bool
+	}{
+		{name: "same line, reworded", gold: goldAt(10, desc), candidate: candidateAt(10, reworded), fuzzy: true},
+		{name: "three lines away is inside the band", gold: goldAt(10, desc), candidate: candidateAt(13, reworded), fuzzy: true},
+		{name: "four lines away is outside the band", gold: goldAt(10, desc), candidate: candidateAt(14, reworded)},
+		{name: "negative line direction shares the band", gold: goldAt(10, desc), candidate: candidateAt(7, reworded), fuzzy: true},
+		{name: "near line, low text overlap", gold: goldAt(11, desc), candidate: candidateAt(11, unrelated)},
+		{name: "same file required", gold: goldAt(10, desc), candidate: `{"findings":[{"id":"c1","file":"b.go","line":10,"description":"nil map write in Load when cfg is empty"}]}`},
+		{name: "missing candidate line never location-matches", gold: goldAt(10, desc), candidate: candidateAt(0, reworded)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			score := ScoreCandidate(tc.gold, tc.candidate)
+			if tc.fuzzy {
+				if score.TruePositive != 1 || score.TruePositiveFuzzy != 1 || score.TruePositiveExact != 0 || score.FalseNegative != 0 || score.Pending != 0 {
+					t.Fatalf("score = %#v, want exactly one fuzzy location match", score)
+				}
+				return
+			}
+			if score.TruePositive != 0 || score.FalseNegative != 1 || score.Pending != 1 {
+				t.Fatalf("score = %#v, want the candidate left unmatched (FN + pending)", score)
+			}
+		})
 	}
 }
 

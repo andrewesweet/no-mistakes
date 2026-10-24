@@ -67,6 +67,11 @@ type findingRow struct {
 	File        string `toon:"file"`
 	Action      string `toon:"action"`
 	Description string `toon:"description"`
+	// Pipeline-written provenance from the outstanding-finding merge: this
+	// row may be a reworded restatement of the named earlier finding. Empty
+	// (and omitted) on every ordinary row; display-only, so it never changes
+	// selection or identity.
+	PossibleRestatementOf string `toon:"possible_restatement_of,omitempty"`
 }
 
 type runRow struct {
@@ -752,11 +757,12 @@ func findingRows(items []types.Finding) []findingRow {
 			continue
 		}
 		rows = append(rows, findingRow{
-			ID:          f.ID,
-			Severity:    f.Severity,
-			File:        f.File,
-			Action:      f.Action,
-			Description: f.Description,
+			ID:                    f.ID,
+			Severity:              f.Severity,
+			File:                  f.File,
+			Action:                f.Action,
+			Description:           f.Description,
+			PossibleRestatementOf: f.PossibleRestatementOf,
 		})
 	}
 	return rows
@@ -772,11 +778,12 @@ func preExistingFindingRows(items []types.Finding) []findingRow {
 			continue
 		}
 		rows = append(rows, findingRow{
-			ID:          f.ID,
-			Severity:    f.Severity,
-			File:        f.File,
-			Action:      f.Action,
-			Description: f.Description,
+			ID:                    f.ID,
+			Severity:              f.Severity,
+			File:                  f.File,
+			Action:                f.Action,
+			Description:           f.Description,
+			PossibleRestatementOf: f.PossibleRestatementOf,
 		})
 	}
 	return rows

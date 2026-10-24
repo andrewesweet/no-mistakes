@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/findmatch"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -77,6 +78,11 @@ func findingKey(item types.Finding) types.Finding {
 	// content-derived, so a relabel must merge onto the outstanding finding
 	// instead of minting a second one for the same defect.
 	item.Origin = ""
+	// The restatement annotation is pipeline-written display provenance
+	// ("this row may restate an earlier one"), stamped after identity was
+	// decided. An annotated row restated in a later round must still fold
+	// back onto itself, so the field never joins identity.
+	item.PossibleRestatementOf = ""
 	// The rereview-focus marker is the reviewer's own prose annotation, and a
 	// later round appends or drops it without the defect changing. Strip it at
 	// the shared identity boundary so a marked restatement merges onto the
@@ -86,7 +92,8 @@ func findingKey(item types.Finding) types.Finding {
 }
 
 // SameFinding reports whether a and b describe the same finding, ignoring the
-// ID, action, source, operator instructions, and trailing review-round markers.
+// ID, action, source, operator instructions, origin, possible-restatement
+// provenance, and trailing review-round markers.
 func SameFinding(a, b types.Finding) bool {
 	return findingKey(a) == findingKey(b)
 }
@@ -659,8 +666,14 @@ func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, rev
 // substantively reworded restatement does not match its original and is
 // appended as a second item. That is accepted rather than fixed here - it
 // over-blocks instead of dropping anything, and stable finding identity is a
-// separate design pass (Parts 2+3 of the scout report).
+// separate design pass (Parts 2+3 of the scout report). The appended row is
+// no longer silent about the duplication: when it is not an exact restatement
+// but sits within matching distance of an outstanding one (same file, nearby
+// line, overlapping description), annotatePossibleRestatements stamps it
+// with the earlier finding's ID so the gate reads it as a possible
+// restatement instead of an unrelated new row.
 func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string, reviewedPaths []string) string {
+	existingRaw, additionalRaw = annotatePossibleRestatements(existingRaw, additionalRaw)
 	if additionalRaw == "" {
 		if existingRaw == "" {
 			return ""
@@ -720,6 +733,114 @@ func nextFreeReviewFindingID(seen map[string]bool) string {
 			return id
 		}
 	}
+}
+
+// annotatePossibleRestatements copies this round's findings, marking each one
+// that is NOT an exact restatement of an outstanding finding but still sits
+// within matching distance of one (internal/findmatch's location rule: same
+// file, line within the band, description overlap past the minimum) with the
+// earlier finding's ID. The mark rides the item through mergeFindingsJSON,
+// so exactly the rows that append as second rows carry it; a row the merge
+// folds into its original (an exact or unique-fingerprint restatement) is
+// skipped - there is no second row to explain. Matching is best-effort: any
+// parse or marshal failure returns the round unchanged, because the
+// annotation explains a row and must never change the merge's outcome.
+func annotatePossibleRestatements(existingRaw, additionalRaw string) (string, string) {
+	if existingRaw == "" {
+		return existingRaw, additionalRaw
+	}
+	existing, err := types.ParseFindingsJSON(existingRaw)
+	if err != nil {
+		return existingRaw, additionalRaw
+	}
+	anchors := make(map[string]bool, len(existing.Items))
+	for _, item := range existing.Items {
+		if item.ID != "" {
+			anchors[item.ID] = true
+		}
+	}
+	cleared := false
+	for i, item := range existing.Items {
+		if item.PossibleRestatementOf != "" && !anchors[item.PossibleRestatementOf] {
+			existing.Items[i].PossibleRestatementOf = ""
+			cleared = true
+		}
+	}
+	if cleared {
+		encoded, err := types.MarshalFindingsJSON(existing)
+		if err != nil {
+			return existingRaw, additionalRaw
+		}
+		existingRaw = encoded
+	}
+	current, err := types.ParseFindingsJSON(additionalRaw)
+	if err != nil {
+		return existingRaw, additionalRaw
+	}
+	exact := make(map[types.Finding]bool, len(existing.Items))
+	for _, item := range existing.Items {
+		exact[findingKey(item)] = true
+	}
+	// The same maps mergeFindingsJSON builds, so "not an exact restatement"
+	// here means exactly "will append as a second row" there.
+	existingCounts := countFindingFingerprints(existing.Items)
+	currentCounts := countFindingFingerprints(current.Items)
+	annotated := false
+	for i, item := range current.Items {
+		if hasFindingMatch(item, exact, existingCounts, currentCounts) {
+			continue
+		}
+		if item.PossibleRestatementOf != "" {
+			// The pipeline is the only writer that matters; an anchor that
+			// already rides the payload is kept, not recomputed.
+			continue
+		}
+		anchor, ok := bestRestatementAnchor(item, existing.Items)
+		if !ok {
+			continue
+		}
+		current.Items[i].PossibleRestatementOf = anchor
+		annotated = true
+	}
+	if !annotated {
+		return existingRaw, additionalRaw
+	}
+	encoded, err := types.MarshalFindingsJSON(current)
+	if err != nil {
+		return existingRaw, additionalRaw
+	}
+	return existingRaw, encoded
+}
+
+// bestRestatementAnchor names the outstanding finding the candidate most
+// likely restates: among the ones passing the location matcher, the strongest
+// description overlap, ties broken by the smaller line distance and then by
+// outstanding order. A finding without an ID cannot anchor anything.
+func bestRestatementAnchor(candidate types.Finding, outstanding []types.Finding) (string, bool) {
+	bestID := ""
+	bestOverlap := 0.0
+	bestDistance := 0
+	found := false
+	for _, item := range outstanding {
+		if item.ID == "" {
+			continue
+		}
+		overlap, ok := findmatch.LocationOverlap(
+			findmatch.Finding{File: candidate.File, Line: candidate.Line, Description: candidate.Description},
+			findmatch.Finding{File: item.File, Line: item.Line, Description: item.Description},
+		)
+		if !ok {
+			continue
+		}
+		distance := candidate.Line - item.Line
+		if distance < 0 {
+			distance = -distance
+		}
+		if !found || overlap > bestOverlap || (overlap == bestOverlap && distance < bestDistance) {
+			found, bestID, bestOverlap, bestDistance = true, item.ID, overlap, distance
+		}
+	}
+	return bestID, found
 }
 
 // combineSelectedFindingIDs returns the ordered list of finding IDs that
