@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"slices"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -172,6 +173,12 @@ func (m *RunManager) cancelQueuedRun(qe queuedRun, cause string) {
 	}
 	if err != nil {
 		slog.Error("failed to mark queued run cancelled", "run_id", qe.runID, "error", err)
+	}
+	if err == nil && qe.recovered != nil && qe.recovered.AwaitingAgentSince != nil {
+		parkStart := time.Unix(*qe.recovered.AwaitingAgentSince, 0)
+		if dbErr := m.db.CompleteRunAwaitingAgent(qe.runID, time.Since(parkStart).Milliseconds()); dbErr != nil {
+			slog.Warn("failed to complete queued run awaiting-agent state", "run_id", qe.runID, "error", dbErr)
+		}
 	}
 	if err == nil && (qe.recovered == nil || verified) {
 		m.removeRunWorktree(qe.repoID, qe.runID, qe.gateDir, qe.wtDir, "queued_run_cancelled")

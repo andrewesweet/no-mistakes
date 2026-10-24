@@ -573,6 +573,9 @@ func TestMaxConcurrentRuns_CancelRecoveredRunPreservesUnpublishedHead(t *testing
 			if err := m.HandleRespond(run.ID, types.StepDocument, types.ActionApprove, nil); err == nil {
 				t.Fatal("second recovered run executed instead of queuing")
 			}
+			// Ensure closing the park must retain positive elapsed time, rather
+			// than only clearing its awaiting-agent marker.
+			time.Sleep(10 * time.Millisecond)
 			wantCause := types.RunCancelReasonAbortedByUser
 			if action == "supersede" {
 				wantCause = types.RunCancelReasonSuperseded
@@ -593,6 +596,14 @@ func TestMaxConcurrentRuns_CancelRecoveredRunPreservesUnpublishedHead(t *testing
 			}
 			if terminal.Status != types.RunCancelled || terminal.Error == nil || *terminal.Error != wantCause {
 				t.Fatalf("cancelled run = %#v, want cancelled with cause %s", terminal, wantCause)
+			}
+			// A terminal run no longer awaits an operator. Queued recovery must
+			// close the park even though no executor ran its normal gate cleanup.
+			if terminal.AwaitingAgentSince != nil {
+				t.Errorf("cancelled queued recovered run still awaits an operator since %d", *terminal.AwaitingAgentSince)
+			}
+			if terminal.ParkedMS < 10 {
+				t.Errorf("cancelled queued recovered run parked duration = %d ms, want at least 10 ms", terminal.ParkedMS)
 			}
 			if action == "conflicting_anchor" {
 				if terminal.TerminalHeadVerifiedAt != nil {
