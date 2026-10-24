@@ -92,7 +92,8 @@ func findingKey(item types.Finding) types.Finding {
 }
 
 // SameFinding reports whether a and b describe the same finding, ignoring the
-// ID, action, source, operator instructions, and trailing review-round markers.
+// ID, action, source, operator instructions, origin, possible-restatement
+// provenance, and trailing review-round markers.
 func SameFinding(a, b types.Finding) bool {
 	return findingKey(a) == findingKey(b)
 }
