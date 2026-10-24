@@ -59,8 +59,9 @@ jobs:
     # and then ran those packages sequentially, so total wall could exceed
     # timeout-minutes with no package hitting go test -timeout - an
     # evidence-free cancellation. Git-heavy packages are split from the core
-    # remainder, and pipeline/steps is its own shard so it no longer serializes
-    # behind the other git-heavy packages on a 4-core GitHub-hosted runner.
+    # remainder, and pipeline/steps is its own shard (sliced in two below) so
+    # it no longer serializes behind the other git-heavy packages on a 4-core
+    # GitHub-hosted runner.
     # Each shard's wall stays below this cap so a real hang dumps goroutines.
     # 40 is a runaway guard, not a target - Linux and macOS finish far inside
     # it, and it still keeps a wedged runner well short of the six-hour default.
@@ -115,9 +116,25 @@ jobs:
         if: runner.os == 'Windows' && matrix.shard == 'git'
         run: go test -v -timeout=15m ./internal/git ./internal/branchsync ./internal/gate ./internal/evidence ./internal/daemon ./internal/eval
 
-      - name: Test on Windows (pipeline/steps)
+      # pipeline/steps outgrew one 15m binary budget on Windows: ~1050 git- and
+      # sqlite-heavy tests overlap through t.Parallel at only ~2.6x, so the
+      # single binary crossed 15m and panicked with goroutines parked in
+      # waitParallel. The job therefore runs two sequential go test invocations
+      # over the SAME packages, sliced by test-name initial (^Test[A-M] and
+      # ^Test[N-Z]). The initial split is exhaustive by construction - every
+      # Test-prefixed name lands in exactly one slice, so a new test cannot
+      # fall out of CI - and it is balanced in measured Windows time. Each
+      # invocation is a fresh test binary with its own -timeout, so a hang
+      # still dumps goroutines per binary instead of eating the job cap.
+      # workflow_ci_windows_leg_test.go pins that the slices cover every test
+      # exactly once, that they stay balanced, and that no test is dropped.
+      - name: Test on Windows (pipeline/steps a-m)
         if: runner.os == 'Windows' && matrix.shard == 'steps'
-        run: go test -v -timeout=15m ./internal/pipeline/steps/...
+        run: go test -v -timeout=15m -run '^Test[A-M]' ./internal/pipeline/steps/...
+
+      - name: Test on Windows (pipeline/steps n-z)
+        if: ${{ !cancelled() && runner.os == 'Windows' && matrix.shard == 'steps' }}
+        run: go test -v -timeout=15m -run '^Test[N-Z]' ./internal/pipeline/steps/...
 
       - name: Test on Windows (core)
         if: runner.os == 'Windows' && matrix.shard == 'core'

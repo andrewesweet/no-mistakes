@@ -20,8 +20,10 @@ import (
 // These tests pin the properties that keep that from silently coming back - the
 // scan-exclusion step, a three-way shard split (core remainder, git-heavy
 // packages without pipeline/steps, and pipeline/steps alone) so each job's wall
-// stays inside the cap, and a per-binary Go timeout well inside that cap so a
-// genuine hang lands as a goroutine dump instead of an opaque job cancellation.
+// stays inside the cap, the pipeline/steps shard sliced by test-name initial
+// into two sequential fresh-binary go test invocations once its single binary
+// outgrew 15m, and a per-binary Go timeout well inside that cap so a genuine
+// hang lands as a goroutine dump instead of an opaque job cancellation.
 //
 // The workflow cannot be exercised from `go test` (it needs a Windows runner),
 // so it is asserted through a typed workflow, `go list` package sets, and a
@@ -118,12 +120,23 @@ func goListPackages(t *testing.T, patterns ...string) []string {
 }
 
 func goTestPackagePatterns(command workflowCommand) []string {
+	// Value flags consume the following token, so a quoted -run pattern is
+	// not mistaken for a package argument. go list fails loudly if another
+	// value flag ever appears without being listed here.
+	valueFlags := map[string]bool{"-run": true, "-timeout": true}
+	wantValue := false
 	var patterns []string
 	for _, arg := range command.args[1:] {
-		if strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "@") {
+		switch {
+		case strings.HasPrefix(arg, "@"):
 			continue
+		case wantValue:
+			wantValue = false
+		case strings.HasPrefix(arg, "-"):
+			wantValue = valueFlags[arg] && !strings.Contains(arg, "=")
+		default:
+			patterns = append(patterns, arg)
 		}
-		patterns = append(patterns, arg)
 	}
 	return patterns
 }
@@ -262,8 +275,11 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	if coreCommand.name == "" {
 		t.Fatal("Windows tests must keep a go-list remainder shard")
 	}
-	if len(explicit) != 2 {
-		t.Fatalf("Windows tests must list exactly two explicit package shards (git-heavy remainder and pipeline/steps), got %d", len(explicit))
+	// The steps shard runs as two -run slice commands over one package set;
+	// they count as one package shard here, and
+	// requireStepsSlicesCoverEveryTest pins their partition below.
+	if len(explicit) != 3 {
+		t.Fatalf("Windows tests must list exactly three explicit package shard commands (git-heavy remainder plus the two pipeline/steps slices), got %d", len(explicit))
 	}
 	for _, shard := range wantWindowsShards {
 		if _, ok := stepShards[shard]; !ok {
@@ -277,16 +293,13 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	}
 
 	stepsWant := goListPackages(t, "./internal/pipeline/steps/...")
-	var stepsCommand, gitCommand workflowCommand
-	var stepsFromArgs, gitFromArgs []string
+	var stepsCommands []workflowCommand
+	var gitCommand workflowCommand
+	var gitFromArgs []string
 	for _, command := range explicit {
 		pkgs := goListPackages(t, goTestPackagePatterns(command)...)
 		if slices.Equal(pkgs, stepsWant) {
-			if stepsCommand.name != "" {
-				t.Fatal("multiple Windows shards list only pipeline/steps packages")
-			}
-			stepsCommand = command
-			stepsFromArgs = pkgs
+			stepsCommands = append(stepsCommands, command)
 			continue
 		}
 		if gitCommand.name != "" {
@@ -295,21 +308,22 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 		gitCommand = command
 		gitFromArgs = pkgs
 	}
-	if stepsCommand.name == "" {
-		t.Fatal("Windows tests must run ./internal/pipeline/steps/... on its own shard")
+	if len(stepsCommands) != 2 {
+		t.Fatalf("Windows tests must run ./internal/pipeline/steps/... on its own shard as exactly two -run slice commands, got %d", len(stepsCommands))
 	}
 	if gitCommand.name == "" {
 		t.Fatal("Windows tests must keep a git-heavy remainder shard besides pipeline/steps")
 	}
-	if overlap := packagesOverlap(stepsFromArgs, gitFromArgs); len(overlap) > 0 {
+	if overlap := packagesOverlap(stepsWant, gitFromArgs); len(overlap) > 0 {
 		t.Fatalf("git and steps shards must not overlap, also ran %v", overlap)
 	}
+	requireStepsSlicesCoverEveryTest(t, stepsCommands, stepsWant)
 
 	exclude := windowsGitExcludePattern(t, job.Steps[coreCommand.step])
 	all := goListPackages(t, "./...")
 	gitHeavyFromFilter := filterPackages(all, exclude, true)
 	coreFromFilter := filterPackages(all, exclude, false)
-	gitHeavyFromArgs := append(append([]string{}, gitFromArgs...), stepsFromArgs...)
+	gitHeavyFromArgs := append(append([]string{}, gitFromArgs...), stepsWant...)
 	slices.Sort(gitHeavyFromArgs)
 	if !slices.Equal(gitHeavyFromArgs, gitHeavyFromFilter) {
 		t.Fatalf("git+steps shard packages %v do not match NM_CI_WINDOWS_GIT_EXCLUDE %q -> %v", gitHeavyFromArgs, exclude, gitHeavyFromFilter)
@@ -320,7 +334,7 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 		"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/citest",
 	}
 	for _, pkg := range requiredSteps {
-		if !slices.Contains(stepsFromArgs, pkg) {
+		if !slices.Contains(stepsWant, pkg) {
 			t.Errorf("steps shard must include %s so CI-monitor tests stay with pipeline/steps", pkg)
 		}
 		if slices.Contains(gitFromArgs, pkg) {
@@ -338,7 +352,7 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 		if !slices.Contains(gitFromArgs, pkg) {
 			t.Errorf("git-heavy remainder must include %s, the documented Windows wall floor", pkg)
 		}
-		if slices.Contains(stepsFromArgs, pkg) {
+		if slices.Contains(stepsWant, pkg) {
 			t.Errorf("steps shard must not include %s; that package belongs on the git-heavy remainder", pkg)
 		}
 		if slices.Contains(coreFromFilter, pkg) {
@@ -348,7 +362,7 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 
 	var union []string
 	union = append(union, gitFromArgs...)
-	union = append(union, stepsFromArgs...)
+	union = append(union, stepsWant...)
 	union = append(union, coreFromFilter...)
 	slices.Sort(union)
 	if !slices.Equal(union, all) {
@@ -395,6 +409,11 @@ func packagesOverlap(a, b []string) []string {
 
 func matrixShardCondition(ifCond string) string {
 	fields := strings.Fields(normalizeWorkflowCondition(ifCond))
+	// A follow-on slice step uses !cancelled() so a failed first slice does
+	// not hide the second slice's own verdict; the gate is unchanged.
+	if len(fields) >= 9 && fields[0] == "!cancelled()" && fields[1] == "&&" {
+		fields = fields[2:]
+	}
 	if len(fields) != 7 || fields[0] != "runner.os" || fields[1] != "==" || fields[2] != "'Windows'" ||
 		fields[3] != "&&" || fields[4] != "matrix.shard" || fields[5] != "==" {
 		return ""
@@ -426,4 +445,95 @@ func goTestTimeout(t *testing.T, command workflowCommand) time.Duration {
 	}
 	t.Fatalf("Windows test command must pass an explicit -timeout, got %#v", command.args)
 	return 0
+}
+
+func goTestRunPattern(t *testing.T, command workflowCommand) string {
+	t.Helper()
+	for i, arg := range command.args[1:] {
+		var value string
+		switch {
+		case strings.HasPrefix(arg, "-run="):
+			value = strings.TrimPrefix(arg, "-run=")
+		case arg == "-run" && i+2 < len(command.args):
+			value = command.args[i+2]
+		default:
+			continue
+		}
+		// The workflow quotes the pattern for the runner shell; the typed
+		// view keeps the raw token.
+		return strings.Trim(value, "'\"")
+	}
+	return ""
+}
+
+func goTestListTests(t *testing.T, pkg string) []string {
+	t.Helper()
+	cmd := exec.Command("go", "test", "-list", ".*", pkg)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go test -list . %s: %v", pkg, err)
+	}
+	var names []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Test") {
+			names = append(names, line)
+		}
+	}
+	return names
+}
+
+// The steps shard runs its packages twice - once per test-name-initial slice -
+// so a test could silently drop out of Windows CI by matching neither -run
+// pattern, or run twice by matching both. Pin the partition the same way the
+// package sets are pinned: resolve every top-level test through `go test
+// -list`, require each to belong to exactly one slice, and require the slices
+// to stay within 30-70% of the tests so growth cannot pile onto one slice's
+// 15m binary budget. Benchmarks are excluded on purpose: go test never runs
+// them without -bench, so no slice can drop one.
+func requireStepsSlicesCoverEveryTest(t *testing.T, sliceCommands []workflowCommand, packages []string) {
+	t.Helper()
+	var patterns []*regexp.Regexp
+	for _, command := range sliceCommands {
+		raw := goTestRunPattern(t, command)
+		if raw == "" {
+			t.Fatalf("steps slice command at step %d must pass exactly one explicit -run pattern; without it the slices overlap or drop tests", command.step)
+		}
+		compiled, err := regexp.Compile(raw)
+		if err != nil {
+			t.Fatalf("steps slice -run %q: %v", raw, err)
+		}
+		patterns = append(patterns, compiled)
+	}
+	if patterns[0].String() == patterns[1].String() {
+		t.Fatalf("steps slice -run patterns are identical (%q); the second slice would only re-run the first", patterns[0])
+	}
+	counts := make([]int, len(patterns))
+	for _, pkg := range packages {
+		for _, name := range goTestListTests(t, pkg) {
+			matched := -1
+			for i, pattern := range patterns {
+				if pattern.MatchString(name) {
+					if matched >= 0 {
+						t.Fatalf("%s in %s matches steps slice patterns %q and %q; a test must belong to exactly one slice", name, pkg, patterns[0], patterns[1])
+					}
+					matched = i
+				}
+			}
+			if matched < 0 {
+				t.Fatalf("%s in %s matches neither steps slice pattern (%q, %q); Windows CI would never run it", name, pkg, patterns[0], patterns[1])
+			}
+			counts[matched]++
+		}
+	}
+	total := counts[0] + counts[1]
+	if total == 0 {
+		t.Fatal("go test -list resolved zero tests across the steps packages; the partition check would be vacuous")
+	}
+	for i, count := range counts {
+		fraction := float64(count) / float64(total)
+		if fraction < 0.3 || fraction > 0.7 {
+			t.Fatalf("steps slice %q holds %d of %d tests (%.0f%%); slices must stay within 30-70%% so one binary cannot creep back toward its 15m budget", patterns[i], count, total, fraction*100)
+		}
+	}
 }
