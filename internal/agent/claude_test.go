@@ -893,6 +893,7 @@ func TestClaudeAgent_RetriesTerminalNetworkErrors(t *testing.T) {
 				}
 				if mode == "resume" {
 					opts.Session = &SessionRef{ID: "helper-session"}
+					t.Setenv("NM_CLAUDE_STDIN_EXPECT_RESUME", "helper-session")
 				}
 				res, err := newClaudeStdinHelperAgent(t).Run(context.Background(), opts)
 				if attempts != wantAttempts {
@@ -1089,6 +1090,11 @@ func TestClaudeStdinHelper(t *testing.T) {
 		_, _ = io.WriteString(os.Stdout, os.Getenv("NM_CLAUDE_STDIN_BANNER"))
 		os.Exit(1)
 	case "transient-then-succeed":
+		// Validate each subprocess invocation, including retries, against the
+		// caller's requested conversation before emitting any result.
+		if session := os.Getenv("NM_CLAUDE_STDIN_EXPECT_RESUME"); session != "" && !claudeArgsContainPair(args, "--resume", session) {
+			t.Fatalf("argv %v missing --resume %s", args, session)
+		}
 		// Fails NM_CLAUDE_STDIN_TRANSIENT_REMAIN invocations (banner on stdout,
 		// exit 1), counted through NM_CLAUDE_STDIN_COUNT_FILE because every
 		// retry attempt is a fresh process, then emits a success result.
