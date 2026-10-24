@@ -2334,8 +2334,8 @@ func (m *RunManager) Shutdown() {
 }
 
 // HandleCancel stops an active run and propagates cancellation to the executor.
-// A run still queued behind the execution cap never started: it is removed
-// from the queue and recorded cancelled without ever executing.
+// A queued run is removed and recorded cancelled without starting or resuming
+// its executor.
 func (m *RunManager) HandleCancel(runID string) error {
 	m.mu.Lock()
 	if qe, ok := m.extractQueuedLocked(runID); ok {
@@ -2366,8 +2366,8 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 		return
 	}
 
-	// A superseding push also clears the branch's queued runs: they have no
-	// executor to cancel, so they are recorded cancelled without starting.
+	// A superseding push also clears the branch's queued runs before their
+	// executors can start or resume.
 	// This keeps the one-active-run-per-branch invariant the recovery scan
 	// relies on.
 	m.mu.Lock()

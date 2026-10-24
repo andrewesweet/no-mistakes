@@ -156,9 +156,10 @@ func (m *RunManager) extractQueuedForBranchLocked(repoID, branch string) []queue
 	return out
 }
 
-// cancelQueuedRun records a queued run terminal without ever starting it and
-// releases everything its submit-time setup holds. It frees no execution
-// slot - a queued run never held one - so no pump follows.
+// cancelQueuedRun records a queued run terminal without starting or resuming
+// its executor and releases its setup resources. A recovered run's head must
+// be preserved before its worktree is removed. It frees no execution slot in
+// this daemon lifetime, so no pump follows.
 func (m *RunManager) cancelQueuedRun(qe queuedRun, cause string) {
 	var head string
 	var verified bool
