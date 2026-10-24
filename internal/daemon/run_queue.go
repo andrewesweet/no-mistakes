@@ -7,13 +7,14 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 type queuedRun struct {
 	sequence  uint64
-	recovered bool
+	recovered *db.Run
 	runID     string
 	repoID    string
 	branch    string
@@ -113,7 +114,7 @@ func (m *RunManager) shutdownQueuedRun(qe queuedRun) {
 	if qe.spawn == nil {
 		return
 	}
-	if qe.recovered {
+	if qe.recovered != nil {
 		qe.cancel(pipeline.ErrDaemonShutdown)
 		_ = qe.agent.Close()
 		return
@@ -158,10 +159,23 @@ func (m *RunManager) extractQueuedForBranchLocked(repoID, branch string) []queue
 // releases everything its submit-time setup holds. It frees no execution
 // slot - a queued run never held one - so no pump follows.
 func (m *RunManager) cancelQueuedRun(qe queuedRun, cause string) {
-	if err := m.db.UpdateRunErrorStatus(qe.runID, cause, types.RunCancelled); err != nil {
+	var head string
+	var verified bool
+	if qe.recovered != nil {
+		head, verified = preserveRunHead(m.db, qe.wtDir, qe.recovered)
+	}
+	var err error
+	if verified {
+		err = m.db.UpdateRunErrorStatusWithVerifiedHead(qe.runID, cause, types.RunCancelled, head)
+	} else {
+		err = m.db.UpdateRunErrorStatus(qe.runID, cause, types.RunCancelled)
+	}
+	if err != nil {
 		slog.Error("failed to mark queued run cancelled", "run_id", qe.runID, "error", err)
 	}
-	m.removeRunWorktree(qe.repoID, qe.runID, qe.gateDir, qe.wtDir, "queued_run_cancelled")
+	if err == nil && (qe.recovered == nil || verified) {
+		m.removeRunWorktree(qe.repoID, qe.runID, qe.gateDir, qe.wtDir, "queued_run_cancelled")
+	}
 	qe.cancel(nil)
 	qe.agent.Close()
 	m.closeSubscribers(qe.runID)

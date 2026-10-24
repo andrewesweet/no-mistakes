@@ -886,17 +886,13 @@ type Config struct {
 	AgentConfig           map[string]agentcfg.Profile
 	// QuotaRouting and QuotaProviders are copied from global config only (see
 	// GlobalConfig.QuotaRouting); no repository layer can set either.
-	QuotaRouting      QuotaRouting
-	QuotaProviders    map[string]string
-	ReviewAgents      map[string]ReviewAgent
-	CITimeout         time.Duration
-	StepQuietWarning  time.Duration
-	AgentTimeout      time.Duration
-	AgentCrashRetries int
-	// MaxConcurrentRuns is the resolved daemon-wide execution cap, copied
-	// from global config only (see GlobalConfig.MaxConcurrentRuns); no
-	// repository layer can set it.
-	MaxConcurrentRuns         int
+	QuotaRouting              QuotaRouting
+	QuotaProviders            map[string]string
+	ReviewAgents              map[string]ReviewAgent
+	CITimeout                 time.Duration
+	StepQuietWarning          time.Duration
+	AgentTimeout              time.Duration
+	AgentCrashRetries         int
 	AgentTimeoutsConfigured   bool
 	ReviewAgentTimeout        time.Duration
 	TestAgentTimeout          time.Duration
@@ -4041,7 +4037,6 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		StepQuietWarning:          global.StepQuietWarning,
 		AgentTimeout:              global.AgentTimeout,
 		AgentCrashRetries:         global.AgentCrashRetries,
-		MaxConcurrentRuns:         global.MaxConcurrentRuns,
 		AgentTimeoutsConfigured:   global.AgentTimeoutsConfigured,
 		ReviewAgentTimeout:        global.ReviewAgentTimeout,
 		TestAgentTimeout:          global.TestAgentTimeout,

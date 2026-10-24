@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -431,40 +433,8 @@ func TestMaxConcurrentRuns_RecoveredParkedRunsShareCap(t *testing.T) {
 	repo, head := setupTestGitRepo(t, p, d, "recovered-cap")
 	var ids []string
 	for _, branch := range []string{"feature/first", "feature/second"} {
-		run, err := d.InsertRun(repo.ID, branch, head, head)
-		if err != nil {
-			t.Fatal(err)
-		}
+		run := insertParkedQueueTestRun(t, p, d, repo, branch, head)
 		ids = append(ids, run.ID)
-		if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
-			t.Fatal(err)
-		}
-		if err := gitpkg.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), p.WorktreeDir(repo.ID, run.ID), head); err != nil {
-			t.Fatal(err)
-		}
-		step, err := d.InsertStepResult(run.ID, types.StepDocument)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := d.StartStep(step.ID); err != nil {
-			t.Fatal(err)
-		}
-		findings := `{"findings":[{"id":"approval","severity":"warning","description":"needs approval","action":"ask-user"}],"summary":"needs approval"}`
-		if err := d.SetStepFindings(step.ID, findings); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := d.InsertReviewStepRound(step.ID, 1, "initial", &findings, nil, head, 1); err != nil {
-			t.Fatal(err)
-		}
-		if err := d.UpdateStepStatusWithDuration(step.ID, types.StepStatusAwaitingApproval, 1); err != nil {
-			t.Fatal(err)
-		}
-		if err := d.SetRunAwaitingAgent(run.ID); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := d.InsertStepResult(run.ID, types.StepLint); err != nil {
-			t.Fatal(err)
-		}
 	}
 	plans := m.recoverableParkedRuns(context.Background())
 	if len(plans) != 2 {
@@ -523,4 +493,137 @@ func TestMaxConcurrentRuns_RecoveredParkedRunsShareCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForRunTerminalStatus(t, d, ids[1])
+}
+
+func insertParkedQueueTestRun(t *testing.T, p *paths.Paths, d *db.DB, repo *db.Repo, branch, head string) *db.Run {
+	t.Helper()
+	run, err := d.InsertRun(repo.ID, branch, head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := gitpkg.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), p.WorktreeDir(repo.ID, run.ID), head); err != nil {
+		t.Fatal(err)
+	}
+	step, err := d.InsertStepResult(run.ID, types.StepDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.StartStep(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"approval","severity":"warning","description":"needs approval","action":"ask-user"}],"summary":"needs approval"}`
+	if err := d.SetStepFindings(step.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertReviewStepRound(step.ID, 1, "initial", &findings, nil, head, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateStepStatusWithDuration(step.ID, types.StepStatusAwaitingApproval, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertStepResult(run.ID, types.StepLint); err != nil {
+		t.Fatal(err)
+	}
+
+	return run
+}
+
+func TestMaxConcurrentRuns_CancelRecoveredRunPreservesUnpublishedHead(t *testing.T) {
+	for _, action := range []string{"cancel", "supersede", "conflicting_anchor"} {
+		t.Run(action, func(t *testing.T) {
+			p, d := newParkedRunEnv(t)
+			content, err := os.ReadFile(p.ConfigFile())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p.ConfigFile(), append(content, []byte("max_concurrent_runs: 1\n")...), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			m := NewRunManager(d, p, func() []pipeline.Step {
+				return []pipeline.Step{&mockApprovalStep{name: types.StepDocument}, &mockPassStep{name: types.StepLint}}
+			})
+			t.Cleanup(m.Shutdown)
+			repo, submitted := setupTestGitRepo(t, p, d, "cancel-recovered")
+			insertParkedQueueTestRun(t, p, d, repo, "feature/held", submitted)
+			run := insertParkedQueueTestRun(t, p, d, repo, "feature/queued", submitted)
+			gateDir := p.RepoDir(repo.ID)
+			gitCmd(t, gateDir, "update-ref", "refs/heads/"+run.Branch, submitted)
+			workDir := p.WorktreeDir(repo.ID, run.ID)
+			const fixContent = "unpublished pipeline fix\n"
+			if err := os.WriteFile(filepath.Join(workDir, "pipeline-fix.txt"), []byte(fixContent), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, workDir, "add", "pipeline-fix.txt")
+			gitCmd(t, workDir, "-c", "user.email=test@test.com", "-c", "user.name=Test", "commit", "-m", "unpublished pipeline fix")
+			fixed := gitOutput(t, workDir, "rev-parse", "HEAD")
+			if err := d.UpdateRunHeadSHA(run.ID, fixed); err != nil {
+				t.Fatal(err)
+			}
+			plans := m.recoverableParkedRuns(context.Background())
+			if len(plans) != 2 {
+				t.Fatalf("recoverable plans = %d, want two", len(plans))
+			}
+			m.resumeRecoveredRuns(plans)
+			if err := m.HandleRespond(run.ID, types.StepDocument, types.ActionApprove, nil); err == nil {
+				t.Fatal("second recovered run executed instead of queuing")
+			}
+			wantCause := types.RunCancelReasonAbortedByUser
+			if action == "supersede" {
+				wantCause = types.RunCancelReasonSuperseded
+				if _, err := m.startRun(context.Background(), repo, run.Branch, submitted, submitted, "push", nil, "", "", false, "", nil); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if action == "conflicting_anchor" {
+					gitCmd(t, gateDir, "update-ref", custody.RecoveryRef(run.ID), submitted)
+				}
+				if err := m.HandleCancel(run.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			terminal, err := d.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if terminal.Status != types.RunCancelled || terminal.Error == nil || *terminal.Error != wantCause {
+				t.Fatalf("cancelled run = %#v, want cancelled with cause %s", terminal, wantCause)
+			}
+			if action == "conflicting_anchor" {
+				if terminal.TerminalHeadVerifiedAt != nil {
+					t.Fatal("conflicting anchor was recorded as verified")
+				}
+				if got := gitOutput(t, workDir, "rev-parse", "HEAD"); got != fixed {
+					t.Fatalf("unpreserved worktree head = %s, want %s", got, fixed)
+				}
+				if got := gitOutput(t, gateDir, "rev-parse", custody.RecoveryRef(run.ID)); got != submitted {
+					t.Fatalf("conflicting anchor changed to %s, want %s", got, submitted)
+				}
+				return
+			}
+			if terminal.TerminalHeadVerifiedAt == nil || terminal.HeadSHA != fixed {
+				t.Fatalf("terminal head = %s, verified = %v, want verified %s", terminal.HeadSHA, terminal.TerminalHeadVerifiedAt, fixed)
+			}
+			if _, err := os.Stat(workDir); !os.IsNotExist(err) {
+				t.Fatalf("cancelled worktree was not removed: %v", err)
+			}
+			if got := gitOutput(t, gateDir, "rev-parse", custody.RecoveryRef(run.ID)); got != fixed {
+				t.Fatalf("recovery anchor = %s, want %s", got, fixed)
+			}
+			if got := gitOutput(t, gateDir, "show", custody.RecoveryRef(run.ID)+":pipeline-fix.txt"); got != "unpublished pipeline fix" {
+				t.Fatalf("preserved content = %q", got)
+			}
+			if got := gitOutput(t, gateDir, "rev-parse", "refs/heads/"+run.Branch); got != submitted {
+				t.Fatalf("preservation changed gate head to %s, want %s", got, submitted)
+			}
+			if got, err := resolveRerunHead(context.Background(), gateDir, run.Branch, terminal); err != nil || got != fixed {
+				t.Fatalf("rerun head = %s, error = %v, want %s", got, err, fixed)
+			}
+		})
+	}
 }

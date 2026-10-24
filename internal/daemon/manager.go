@@ -553,7 +553,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	}
 	m.admitRun(sequence, queuedRun{
 		runID: plan.run.ID, repoID: plan.repo.ID, branch: plan.run.Branch,
-		gateDir: plan.gateDir, wtDir: plan.workDir, recovered: true,
+		gateDir: plan.gateDir, wtDir: plan.workDir, recovered: plan.run,
 		executor: executor, cancel: cancel, done: done, agent: plan.agent, spawn: spawn,
 	})
 }

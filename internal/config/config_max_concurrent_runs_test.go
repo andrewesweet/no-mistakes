@@ -20,10 +20,6 @@ func TestLoadGlobal_MaxConcurrentRuns(t *testing.T) {
 	if cfg.MaxConcurrentRuns != 2 {
 		t.Fatalf("max_concurrent_runs = %d, want 2", cfg.MaxConcurrentRuns)
 	}
-	merged := Merge(cfg, &RepoConfig{})
-	if merged.MaxConcurrentRuns != 2 {
-		t.Fatalf("Merge did not preserve global max_concurrent_runs: %d", merged.MaxConcurrentRuns)
-	}
 }
 
 func TestLoadGlobal_MaxConcurrentRunsDefaultsToUnlimited(t *testing.T) {
