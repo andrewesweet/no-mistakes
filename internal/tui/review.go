@@ -319,6 +319,12 @@ func renderFindingsRange(f *findings, width int, cursor int, selected map[string
 		if preExisting {
 			line += " " + dimStyle.Render("[pre-existing]")
 		}
+		// And for rows the outstanding-finding merge flagged as a possible
+		// restatement of an earlier finding: the tag names the anchor so the
+		// row reads as "maybe the same defect again", never merged away.
+		if item.PossibleRestatementOf != "" {
+			line += " " + dimStyle.Render(fmt.Sprintf("[possible restatement of %s]", item.PossibleRestatementOf))
+		}
 
 		// File:line reference, truncated to fit within content width.
 		if item.File != "" {
