@@ -1526,6 +1526,13 @@ rounds:
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
 			durationMS := executionMS + roundDuration
+			// Cancellation still fails the step, but cleanup must see a staging
+			// refusal even when it arrived as an already-converted CI outcome.
+			if outcome != nil && HasProtectedPathRefusal(outcome.Findings) {
+				if dbErr := e.db.SetStepFindings(sr.ID, normalizeFindingsJSON(outcome.Findings, string(stepName))); dbErr != nil {
+					slog.Warn("failed to set protected-path refusal in db", "step", stepName, "error", dbErr)
+				}
+			}
 			// Persist the failure reason to the step's own log file. The error
 			// often carries the only detail of why the step failed (e.g. git
 			// stderr from a rejected push); without this the step log shows the
