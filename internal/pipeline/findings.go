@@ -555,11 +555,11 @@ func normalizeCoveredPath(value string) string {
 
 // verifiedFindingLineWindow is how close (in lines) a same-file finding in
 // the verification round must be to a pending finding to read as the same
-// defect shifted or restated. Anything farther away is a distinct defect in
-// the same file and no longer vetoes verification of the fixed one. A report
-// with no usable line - a same-file entry without one, or a pending finding
-// without one - carries no position and reads as nearby, keeping the
-// conservative fail-closed direction for unpositioned reports.
+// defect shifted or restated. A farther report does not trigger this proximity
+// veto; an exact or content match can still keep the pending finding
+// outstanding. A same-file report or pending finding with no usable line
+// carries no position and reads as nearby, keeping the conservative
+// fail-closed direction for unpositioned reports.
 const verifiedFindingLineWindow = 10
 
 // nearSameFileFinding reports whether the verification round named file with
@@ -624,10 +624,11 @@ func nearSameFileFinding(reportedLines map[string][]int, lineUnknown map[string]
 //
 // The nearby-report window is measured from the pending finding's RECORDED
 // line, which is the coordinate of the round that reported it and is never
-// remapped through a later fix's edits. A restatement the fix shifted farther
-// than the window therefore clears here, but it is still present in that
-// round's own findings and is appended to the outstanding set as a new item by
-// mergeOutstandingFindingsJSON, so the defect is never silently lost.
+// remapped through a later fix's edits. If a restatement shifted beyond the
+// window no longer matches the original and all other verification checks
+// pass, the original can clear here. The restatement stays in that round's
+// own findings and is appended to the outstanding set as a new item by
+// mergeOutstandingFindingsJSON, so the report is never silently lost.
 func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, reviewedPaths, reviewablePaths []string, thisRoundRaw string) string {
 	if outstandingRaw == "" || len(pendingIDs) == 0 || len(reviewedPaths) == 0 {
 		return outstandingRaw
