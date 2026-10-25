@@ -51,7 +51,7 @@ func TestShutdown_DrainBoundaries(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { manager.Shutdown() })
+			t.Cleanup(func() { manager.shutdown(0) })
 			if mode == "command-deadline" {
 				marker := filepath.Join(p.WorktreeDir(repo.ID, runID), "shutdown-command-started")
 				deadline := time.Now().Add(10 * time.Second)

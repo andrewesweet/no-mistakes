@@ -191,6 +191,16 @@ func runTestDaemon(t *testing.T, p *paths.Paths, d *db.DB, sf StepFactory, stopW
 
 	t.Cleanup(func() {
 		if client, err := ipc.Dial(p.Socket()); err == nil {
+			// Fixture steps may deliberately block until cancelled. Teardown
+			// must release them before requesting a graceful daemon shutdown;
+			// otherwise each such test spends the production drain grace.
+			runs, err := d.GetActiveRuns()
+			if err != nil {
+				t.Errorf("list fixture runs for cleanup: %v", err)
+			}
+			for _, run := range runs {
+				_ = client.Call(ipc.MethodCancelRun, &ipc.CancelRunParams{RunID: run.ID}, nil)
+			}
 			_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
 			client.Close()
 		}
@@ -280,9 +290,8 @@ func startTestDaemonWithSteps(t *testing.T, sf StepFactory) (*paths.Paths, *db.D
 	}
 	t.Cleanup(func() { d.Close() })
 
-	// Slow fixture steps deliberately wait for cancellation, so shutdown must
-	// first exhaust its drain grace. Then allow the cancellation cleanup and
-	// IPC teardown budgets before releasing the fixture database and root.
+	// Allow cancellation cleanup and IPC teardown before releasing the fixture
+	// database and root. runTestDaemon cancels blocked fixtures before shutdown.
 	runTestDaemon(t, p, d, sf, daemonShutdownTimeout+10*time.Second)
 	return p, d
 }
