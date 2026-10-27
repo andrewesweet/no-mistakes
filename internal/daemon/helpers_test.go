@@ -477,18 +477,23 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"structured
 	return path
 }
 
-func waitForRunTerminalState(t *testing.T, d *db.DB, runID string) *db.Run {
-	t.Helper()
-
-	timeout := 5 * time.Second
+// daemonRunWaitTimeout bounds readiness and completion waits without imposing a
+// process-spawn speed requirement on git-backed daemon runs.
+func daemonRunWaitTimeout() time.Duration {
 	if runtime.GOOS == "windows" {
 		// Git-backed daemon runs routinely take about 10x longer on Windows,
 		// especially while the git-heavy CI shard runs several packages at once.
 		// Keep the assertion bounded without treating normal process-spawn load as
 		// a pipeline failure.
-		timeout = time.Minute
+		return time.Minute
 	}
-	deadline := time.Now().Add(timeout)
+	return 5 * time.Second
+}
+
+func waitForRunTerminalState(t *testing.T, d *db.DB, runID string) *db.Run {
+	t.Helper()
+
+	deadline := time.Now().Add(daemonRunWaitTimeout())
 	for time.Now().Before(deadline) {
 		run, err := d.GetRun(runID)
 		if err != nil {

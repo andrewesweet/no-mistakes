@@ -521,7 +521,7 @@ func TestPushReceivedResolvesForgeProfileIntoRunContext(t *testing.T) {
 		if resolved.gitEnv != "config:"+profileDir+" token:" {
 			t.Fatalf("git subprocess environment = %q", resolved.gitEnv)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(daemonRunWaitTimeout()):
 		t.Fatal("pipeline did not report its forge context")
 	}
 	if run := waitForRunTerminalState(t, d, result.RunID); run.Status != types.RunCompleted {
@@ -609,7 +609,7 @@ func TestPushReceivedKeepsConcurrentForgeProfilesIsolated(t *testing.T) {
 		select {
 		case captured := <-contexts:
 			observed[captured.repoID] = captured
-		case <-time.After(3 * time.Second):
+		case <-time.After(daemonRunWaitTimeout()):
 			t.Fatal("concurrent forge runs did not reach barrier")
 		}
 	}
@@ -657,7 +657,7 @@ func (s *notifyBlockStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOut
 
 func waitForStartedBranch(t *testing.T, started <-chan string, branch string) {
 	t.Helper()
-	timeout := time.After(3 * time.Second)
+	timeout := time.After(daemonRunWaitTimeout())
 	for {
 		select {
 		case got := <-started:
@@ -735,7 +735,7 @@ func TestPushReceivedConcurrentDifferentBranchRunsAvoidSharedConfigLock(t *testi
 		select {
 		case b := <-started:
 			gotStarted[b] = true
-		case <-time.After(3 * time.Second):
+		case <-time.After(daemonRunWaitTimeout()):
 			t.Fatalf("a concurrent run did not start (started so far: %v)", gotStarted)
 		}
 	}
