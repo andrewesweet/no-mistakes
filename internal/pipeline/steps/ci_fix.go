@@ -76,21 +76,55 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 		sctx.Log("fix requested with no CI findings to repair, resuming monitoring...")
 		return nil, nil
 	}
-	if len(targets.Checks) > 0 && s.observedCompletedAt == nil {
+	var failingFindings Findings
+	for _, finding := range targets.Findings.Items {
+		if finding.Category == types.FindingCategoryCICheck {
+			failingFindings.Items = append(failingFindings.Items, finding)
+		}
+	}
+	failingTargets := ciFixTargetsFromFindings(failingFindings)
+	if len(failingTargets.Checks) > 0 {
 		expectedHeadSHA, err := stepGitHeadSHA(sctx)
 		if err != nil {
 			return nil, fmt.Errorf("resolve head before snapshotting selected CI checks: %w", err)
 		}
 		snapshotPR := *pr
 		snapshotPR.HeadSHA = expectedHeadSHA
-		checks, err := host.GetChecks(sctx.Ctx, &snapshotPR)
-		if err != nil {
+		checks, _, moved, err := getCIChecks(sctx.Ctx, host, &snapshotPR)
+		switch {
+		case moved && !pluginContractBroken(err):
+			sctx.Log("selected CI checks are stale; waiting for current checks before repair")
+			failingTargets.Checks = nil
+		case err != nil:
 			return nil, fmt.Errorf("snapshot selected CI checks before repair: %w", err)
+		default:
+			for _, target := range failingTargets.Checks {
+				// Only a fresh failure is repairable. A selected check that
+				// was re-run and then cancelled has no failure left for the
+				// fixer; cancellations go to the ask-user path instead.
+				if !checkTargetStillFailing(checks, target) {
+					sctx.Log("selected CI checks are missing or no longer failing; waiting for current CI observation")
+					failingTargets.Checks = nil
+					break
+				}
+			}
+			if len(failingTargets.Checks) > 0 {
+				s.observedCompletedAt = terminalFailureCompletionTimes(checks)
+			}
 		}
-		if snapshotPR.HeadSHA != expectedHeadSHA {
-			return nil, fmt.Errorf("snapshot selected CI checks before repair: %w", scm.ErrHeadChanged)
+		if len(failingTargets.Checks) == 0 {
+			remaining := types.FindingsMetadata(targets.Findings)
+			remaining.Summary = ""
+			for _, finding := range targets.Findings.Items {
+				if finding.Category != types.FindingCategoryCICheck {
+					remaining.Items = append(remaining.Items, finding)
+				}
+			}
+			targets = ciFixTargetsFromFindings(remaining)
+			if targets.empty() {
+				return nil, nil
+			}
 		}
-		s.observedCompletedAt = terminalFailureCompletionTimes(checks)
 	}
 	issueDesc := targets.description()
 	sctx.Log(fmt.Sprintf("repairing: %s...", issueDesc))
@@ -489,7 +523,7 @@ func ciSelectedFindingsPrompt(findings Findings) string {
 	if err != nil {
 		return ""
 	}
-	section := "\n\nFindings to address (selected for this fix round, with any user instructions):\n" + sanitizedPreviousFindingsForPrompt(encoded)
+	section := "\n\nFindings to address (selected for this fix round, with any user or driver instructions):\n" + sanitizedPreviousFindingsForPrompt(encoded)
 	if len(external) == 0 {
 		return section
 	}
@@ -616,6 +650,24 @@ func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext) (ciRepairR
 }
 
 func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, producer *agent.Result) (ciRepairResult, error) {
+	render := func() (string, error) {
+		repairSummary := summary
+		if repairSummary == "" {
+			repairSummary = "repair failing checks"
+		}
+		message, err := sctx.Config.Commit.RenderFixMessageForBranch(types.StepCI, repairSummary, sctx.Run.Branch)
+		if err != nil {
+			return "", fmt.Errorf("render CI repair commit message: %w", err)
+		}
+		message, err = withCommitTrailers(sctx, message, producer)
+		if err != nil {
+			return "", fmt.Errorf("render CI repair commit trailers: %w", err)
+		}
+		return message, nil
+	}
+	if err := conformAgentCommits(sctx, types.StepCI, render); err != nil {
+		return ciRepairResult{}, err
+	}
 	status, err := stepGitRun(sctx, "status", "--porcelain")
 	if err != nil {
 		return ciRepairResult{}, fmt.Errorf("check CI changes: %w", err)
@@ -629,16 +681,9 @@ func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, produc
 		return ciRepairResult{}, nil
 	}
 
-	if summary == "" {
-		summary = "repair failing checks"
-	}
-	message, err := sctx.Config.Commit.RenderFixMessageForBranch(types.StepCI, summary, sctx.Run.Branch)
+	message, err := render()
 	if err != nil {
-		return ciRepairResult{}, fmt.Errorf("render CI repair commit message: %w", err)
-	}
-	message, err = withCommitTrailers(sctx, message, producer)
-	if err != nil {
-		return ciRepairResult{}, fmt.Errorf("render CI repair commit trailers: %w", err)
+		return ciRepairResult{}, err
 	}
 	if err := stagePipelineChanges(sctx); err != nil {
 		return ciRepairResult{}, fmt.Errorf("stage CI changes: %w", err)
