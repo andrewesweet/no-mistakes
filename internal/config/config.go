@@ -796,8 +796,9 @@ type CI struct {
 	// ReviewBotComments selects when the CI step reads a registered review
 	// bot's (scm.ReviewBotsFor) unresolved review comments.
 	//
-	// "on_failure" (default): only when the bot's check failed, so a green
-	// bot check never blocks checks-passed.
+	// "on_failure" (default): only when the bot's check failed.
+	// RequiredReviews enforces its completion and unresolved-comment rules
+	// independently of this policy.
 	//
 	// "always": also when the bot's check completed green on the current
 	// head, or has not registered on it yet once every other check is green.
