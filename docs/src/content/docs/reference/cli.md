@@ -60,12 +60,15 @@ Two refusals apply to every `init`, with or without the flag.
 It refuses to register a checkout that contains a directory an existing [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) entry points at, naming that entry, because registering it is what would make the placement unusable and stop the daemon; place the checkout elsewhere or repoint the entry first.
 It also refuses to register anything while `~/.no-mistakes/config.yaml` does not load, naming the fault, because the daemon refuses to start on that same config.
 
-Re-running `init` on an already-initialized repo succeeds and reports `Gate already initialized (refreshed)`.
+A successful `init` on an already-initialized repo reports `Gate already initialized (refreshed)`.
 It refreshes managed gate wiring, origin/default-branch metadata, hook-path isolation, and the installed agent skill, overwriting any stale `SKILL.md` content from an older binary.
 When a fork URL is already recorded, re-running `init` without `--fork-url` preserves it.
 Passing `--fork-url` again replaces the stored fork URL after validation.
 If you rename or move an initialized working directory and the old path no longer exists, re-running `init` from the new path reattaches the existing gate, preserves the repo ID and run history, and updates the stored working path.
-If you copy an initialized working directory while the original still exists, the copy is treated as a separate repo and gets a fresh gate.
+If you copy an initialized working directory while the original still exists, the copy is treated as a separate repo and gets a fresh gate, subject to the same remote ownership checks.
+On a fresh init and on a refresh alike, `init` decides from the literal `no-mistakes` remote URL in `.git/config`, before any `url.<base>.insteadOf` rewrite: it repoints stale wiring into its own `repos` directory, leaves alone a URL that your git config already rewrites to this gate for both fetch and push, and refuses anything else, including a remote with several URLs, rather than rewriting it.
+When the checkout's `.git` is shared with another no-mistakes home (another `NM_HOME`, for example a linked worktree used by another OS account), that remote can name the other home's gate. If its absolute path has the form `<other home>/repos/<id>.git` with the same repository ID as this home's gate, the refusal names both gates and prints the per-account rewrite `git config --global 'url.<this gate>.insteadOf' '<other gate>'`, with both paths shell-quoted so it can be pasted as is. Other foreign URLs receive the plain refusal without a rewrite recipe.
+With that rewrite in your own global git config, `init` leaves the shared remote alone and your pushes through it reach your own gate; a rolled-back init or an `eject` from your home leaves it in place too.
 Fresh init rolls back gate setup when a required gate or daemon step fails; refresh does not eject a pre-existing gate if daemon startup fails.
 Skill installation is best-effort: if the skill write fails, init reports it and leaves the working gate in place.
 
@@ -595,7 +598,8 @@ Remove the gate from the current repository.
 no-mistakes eject
 ```
 
-Removes the `no-mistakes` remote, deletes the bare repo directory, cleans up worktrees, and deletes the database record (cascades to runs and steps).
+Removes the `no-mistakes` remote only when it has exactly one literal URL (as written in `.git/config`, before any `url.<base>.insteadOf` rewrite) inside this home's `repos` directory; any other remote, such as another no-mistakes home's gate in a shared `.git`, a remote you pointed elsewhere, or one with several URLs, is left in place.
+It deletes the bare repo directory, cleans up worktrees, and deletes the database record (cascades to runs and steps).
 It does not remove any legacy repo-local agent skill files left by older versions; current `init` installs the skill at user level instead.
 
 ## no-mistakes attach
