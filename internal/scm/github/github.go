@@ -1592,6 +1592,29 @@ func (h *Host) getReviewComments(ctx context.Context, pr *scm.PR, verifiedBotUse
 		return nil, errors.New("expected positive GitHub pull request number")
 	}
 
+	if verifiedBotUserID == 0 && h.host != "" && !strings.EqualFold(h.host, "github.com") && h.requiredReviewAppID > 0 {
+		reviewHost := *h
+		if reviewHost.repo == "" {
+			reviewHost.repo = repo
+		}
+		reviewPR := *pr
+		reviewPR.Number = strconv.Itoa(number)
+		if pr.ObservedHeadSHA != "" {
+			reviewPR.HeadSHA = pr.ObservedHeadSHA
+		}
+		if reviewPR.HeadSHA == "" {
+			reviewPR.HeadSHA, err = reviewHost.getPRHeadSHA(ctx, reviewPR.Number)
+			if err != nil {
+				return nil, err
+			}
+		}
+		review, err := reviewHost.getExternalReview(ctx, &reviewPR, "coderabbit")
+		if err != nil {
+			return nil, err
+		}
+		verifiedBotUserID = review.AuthorID
+	}
+
 	var comments []scm.ReviewComment
 	cursor := ""
 	for {
