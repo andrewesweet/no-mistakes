@@ -1,6 +1,10 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,12 +22,12 @@ import (
 // one. Untuned, a single ./... job compiled every binary and then ran those
 // packages sequentially until timeout-minutes cancelled it with no verdict.
 // These tests pin the properties that keep that from silently coming back - the
-// scan-exclusion step, a three-way shard split (core remainder, git-heavy
-// packages without pipeline/steps, and pipeline/steps alone) so each job's wall
-// stays inside the cap, the pipeline/steps shard sliced by test-name initial
-// into two sequential fresh-binary go test invocations once its single binary
-// outgrew 15m, and a per-binary Go timeout well inside that cap so a genuine
-// hang lands as a goroutine dump instead of an opaque job cancellation.
+// scan-exclusion step, a shard split (core remainder, git-heavy packages
+// without pipeline/steps/daemon/gate, pipeline/steps alone, daemon alone, and
+// gate alone, with daemon/gate split across matrix rows and steps retaining
+// two sequential test-name-initial slices) so each job's wall stays inside the cap, and a per-binary Go timeout
+// well inside that cap so a genuine hang lands as a goroutine dump instead of
+// an opaque job cancellation.
 //
 // The workflow cannot be exercised from `go test` (it needs a Windows runner),
 // so it is asserted through a typed workflow, `go list` package sets, and a
@@ -120,23 +124,17 @@ func goListPackages(t *testing.T, patterns ...string) []string {
 }
 
 func goTestPackagePatterns(command workflowCommand) []string {
-	// Value flags consume the following token, so a quoted -run pattern is
-	// not mistaken for a package argument. go list fails loudly if another
-	// value flag ever appears without being listed here.
-	valueFlags := map[string]bool{"-run": true, "-timeout": true}
-	wantValue := false
 	var patterns []string
 	for _, arg := range command.args[1:] {
-		switch {
-		case strings.HasPrefix(arg, "@"):
+		arg = unquoteWorkflowArg(arg)
+		// The fork's steps slices pass -run and its value as separate tokens.
+		if strings.HasPrefix(arg, "^") {
 			continue
-		case wantValue:
-			wantValue = false
-		case strings.HasPrefix(arg, "-"):
-			wantValue = valueFlags[arg] && !strings.Contains(arg, "=")
-		default:
-			patterns = append(patterns, arg)
 		}
+		if strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "@") {
+			continue
+		}
+		patterns = append(patterns, arg)
 	}
 	return patterns
 }
@@ -223,7 +221,7 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 		t.Fatalf("test job timeout-minutes = %d, want 40 so a wedged runner cannot burn a full six-hour budget", job.TimeoutMinutes)
 	}
 
-	wantWindowsShards := []string{"core", "git", "steps"}
+	wantWindowsShards := []string{"core", "daemon", "gate", "git", "steps"}
 	var matrixShards []string
 	for _, row := range job.Strategy.Matrix.Include {
 		if row["os"] != "windows-latest" {
@@ -236,13 +234,14 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 		matrixShards = append(matrixShards, shard)
 	}
 	slices.Sort(matrixShards)
+	matrixShards = slices.Compact(matrixShards)
 	if !slices.Equal(matrixShards, wantWindowsShards) {
-		t.Fatalf("windows matrix shards %v, want %v so pipeline/steps runs in parallel with the other git-heavy packages", matrixShards, wantWindowsShards)
+		t.Fatalf("windows matrix shards %v, want %v so daemon, gate, and pipeline/steps run in parallel with the other git-heavy packages", matrixShards, wantWindowsShards)
 	}
 
 	tests := windowsGoTestCommands(t)
-	if len(tests) < 3 {
-		t.Fatalf("Windows tests must be split across core, git, and steps shards so one ./... job cannot exceed the cap without a binary hitting -timeout, got %d go test invocations", len(tests))
+	if len(tests) < 5 {
+		t.Fatalf("Windows tests must be split across core, git, steps, daemon, and gate shards so one ./... job cannot exceed the cap without a binary hitting -timeout, got %d go test invocations", len(tests))
 	}
 
 	jobTimeout := time.Duration(job.TimeoutMinutes) * time.Minute
@@ -275,11 +274,8 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	if coreCommand.name == "" {
 		t.Fatal("Windows tests must keep a go-list remainder shard")
 	}
-	// The steps shard runs as two -run slice commands over one package set;
-	// they count as one package shard here, and
-	// requireStepsSlicesCoverEveryTest pins their partition below.
-	if len(explicit) != 3 {
-		t.Fatalf("Windows tests must list exactly three explicit package shard commands (git-heavy remainder plus the two pipeline/steps slices), got %d", len(explicit))
+	if len(explicit) != 5 {
+		t.Fatalf("Windows tests must list five explicit package commands (git-heavy remainder, two steps slices, daemon, and gate), got %d", len(explicit))
 	}
 	for _, shard := range wantWindowsShards {
 		if _, ok := stepShards[shard]; !ok {
@@ -293,76 +289,128 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	}
 
 	stepsWant := goListPackages(t, "./internal/pipeline/steps/...")
+	daemonWant := goListPackages(t, "./internal/daemon")
+	gateWant := goListPackages(t, "./internal/gate")
 	var stepsCommands []workflowCommand
-	var gitCommand workflowCommand
-	var gitFromArgs []string
+	var gitCommand, daemonCommand, gateCommand workflowCommand
+	var stepsFromArgs, gitFromArgs, daemonFromArgs, gateFromArgs []string
 	for _, command := range explicit {
 		pkgs := goListPackages(t, goTestPackagePatterns(command)...)
-		if slices.Equal(pkgs, stepsWant) {
+		switch {
+		case slices.Equal(pkgs, stepsWant):
 			stepsCommands = append(stepsCommands, command)
-			continue
+			stepsFromArgs = pkgs
+		case slices.Equal(pkgs, daemonWant):
+			if daemonCommand.name != "" {
+				t.Fatal("multiple Windows shards list only internal/daemon")
+			}
+			daemonCommand = command
+			daemonFromArgs = pkgs
+		case slices.Equal(pkgs, gateWant):
+			if gateCommand.name != "" {
+				t.Fatal("multiple Windows shards list only internal/gate")
+			}
+			gateCommand = command
+			gateFromArgs = pkgs
+		default:
+			if gitCommand.name != "" {
+				t.Fatalf("extra explicit Windows shard packages %v; want one git-heavy remainder besides steps, daemon, and gate", pkgs)
+			}
+			gitCommand = command
+			gitFromArgs = pkgs
 		}
-		if gitCommand.name != "" {
-			t.Fatalf("extra explicit Windows shard packages %v; want one git-heavy remainder besides pipeline/steps", pkgs)
-		}
-		gitCommand = command
-		gitFromArgs = pkgs
 	}
 	if len(stepsCommands) != 2 {
-		t.Fatalf("Windows tests must run ./internal/pipeline/steps/... on its own shard as exactly two -run slice commands, got %d", len(stepsCommands))
-	}
-	if gitCommand.name == "" {
-		t.Fatal("Windows tests must keep a git-heavy remainder shard besides pipeline/steps")
-	}
-	if overlap := packagesOverlap(stepsWant, gitFromArgs); len(overlap) > 0 {
-		t.Fatalf("git and steps shards must not overlap, also ran %v", overlap)
+		t.Fatalf("Windows steps must keep two sequential slice commands, got %d", len(stepsCommands))
 	}
 	requireStepsSlicesCoverEveryTest(t, stepsCommands, stepsWant)
+	if daemonCommand.name == "" {
+		t.Fatal("Windows tests must run ./internal/daemon on its own shard")
+	}
+	if gateCommand.name == "" {
+		t.Fatal("Windows tests must run ./internal/gate on its own shard")
+	}
+	if gitCommand.name == "" {
+		t.Fatal("Windows tests must keep a git-heavy remainder shard besides steps, daemon, and gate")
+	}
+	explicitSets := [][]string{stepsFromArgs, daemonFromArgs, gateFromArgs, gitFromArgs}
+	for i, a := range explicitSets {
+		for _, b := range explicitSets[i+1:] {
+			if overlap := packagesOverlap(a, b); len(overlap) > 0 {
+				t.Fatalf("explicit Windows shards must not overlap, also ran %v", overlap)
+			}
+		}
+	}
 
 	exclude := windowsGitExcludePattern(t, job.Steps[coreCommand.step])
 	all := goListPackages(t, "./...")
 	gitHeavyFromFilter := filterPackages(all, exclude, true)
 	coreFromFilter := filterPackages(all, exclude, false)
-	gitHeavyFromArgs := append(append([]string{}, gitFromArgs...), stepsWant...)
+	gitHeavyFromArgs := append(append([]string{}, gitFromArgs...), stepsFromArgs...)
+	gitHeavyFromArgs = append(gitHeavyFromArgs, daemonFromArgs...)
+	gitHeavyFromArgs = append(gitHeavyFromArgs, gateFromArgs...)
 	slices.Sort(gitHeavyFromArgs)
 	if !slices.Equal(gitHeavyFromArgs, gitHeavyFromFilter) {
-		t.Fatalf("git+steps shard packages %v do not match NM_CI_WINDOWS_GIT_EXCLUDE %q -> %v", gitHeavyFromArgs, exclude, gitHeavyFromFilter)
+		t.Fatalf("git+steps+daemon+gate shard packages %v do not match NM_CI_WINDOWS_GIT_EXCLUDE %q -> %v", gitHeavyFromArgs, exclude, gitHeavyFromFilter)
 	}
 
-	requiredSteps := []string{
-		"github.com/kunchenguid/no-mistakes/internal/pipeline/steps",
-		"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/citest",
+	requiredOn := []struct {
+		owner string
+		pkgs  []string
+		have  []string
+	}{
+		{"steps", []string{
+			"github.com/kunchenguid/no-mistakes/internal/pipeline/steps",
+			"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/citest",
+		}, stepsFromArgs},
+		{"daemon", []string{
+			"github.com/kunchenguid/no-mistakes/internal/daemon",
+		}, daemonFromArgs},
+		{"gate", []string{
+			"github.com/kunchenguid/no-mistakes/internal/gate",
+		}, gateFromArgs},
+		{"git-heavy remainder", []string{
+			"github.com/kunchenguid/no-mistakes/internal/git",
+			"github.com/kunchenguid/no-mistakes/internal/branchsync",
+		}, gitFromArgs},
 	}
-	for _, pkg := range requiredSteps {
-		if !slices.Contains(stepsWant, pkg) {
-			t.Errorf("steps shard must include %s so CI-monitor tests stay with pipeline/steps", pkg)
-		}
-		if slices.Contains(gitFromArgs, pkg) {
-			t.Errorf("git-heavy remainder must not include %s; that package belongs on the steps shard", pkg)
-		}
-		if slices.Contains(coreFromFilter, pkg) {
-			t.Errorf("core shard must not include git-heavy package %s", pkg)
+	allOwned := map[string]string{}
+	for _, group := range requiredOn {
+		for _, pkg := range group.pkgs {
+			if !slices.Contains(group.have, pkg) {
+				t.Errorf("%s shard must include %s", group.owner, pkg)
+			}
+			if slices.Contains(coreFromFilter, pkg) {
+				t.Errorf("core shard must not include git-heavy package %s", pkg)
+			}
+			allOwned[pkg] = group.owner
 		}
 	}
-	requiredGitRest := []string{
-		"github.com/kunchenguid/no-mistakes/internal/git",
-		"github.com/kunchenguid/no-mistakes/internal/branchsync",
+	ownedSets := []struct {
+		name string
+		pkgs []string
+	}{
+		{"git-heavy remainder", gitFromArgs},
+		{"steps", stepsFromArgs},
+		{"daemon", daemonFromArgs},
+		{"gate", gateFromArgs},
 	}
-	for _, pkg := range requiredGitRest {
-		if !slices.Contains(gitFromArgs, pkg) {
-			t.Errorf("git-heavy remainder must include %s, the documented Windows wall floor", pkg)
-		}
-		if slices.Contains(stepsWant, pkg) {
-			t.Errorf("steps shard must not include %s; that package belongs on the git-heavy remainder", pkg)
-		}
-		if slices.Contains(coreFromFilter, pkg) {
-			t.Errorf("core shard must not include git-heavy package %s", pkg)
+	for pkg, owner := range allOwned {
+		for _, set := range ownedSets {
+			if set.name == owner {
+				continue
+			}
+			if slices.Contains(set.pkgs, pkg) {
+				t.Errorf("%s shard must not include %s; that package belongs on the %s shard", set.name, pkg, owner)
+			}
 		}
 	}
 
 	var union []string
 	union = append(union, gitFromArgs...)
-	union = append(union, stepsWant...)
+	union = append(union, stepsFromArgs...)
+	union = append(union, daemonFromArgs...)
+	union = append(union, gateFromArgs...)
 	union = append(union, coreFromFilter...)
 	slices.Sort(union)
 	if !slices.Equal(union, all) {
@@ -408,12 +456,9 @@ func packagesOverlap(a, b []string) []string {
 }
 
 func matrixShardCondition(ifCond string) string {
-	fields := strings.Fields(normalizeWorkflowCondition(ifCond))
-	// A follow-on slice step uses !cancelled() so a failed first slice does
-	// not hide the second slice's own verdict; the gate is unchanged.
-	if len(fields) >= 9 && fields[0] == "!cancelled()" && fields[1] == "&&" {
-		fields = fields[2:]
-	}
+	condition := normalizeWorkflowCondition(ifCond)
+	condition = strings.TrimSpace(strings.TrimPrefix(condition, "!cancelled() &&"))
+	fields := strings.Fields(condition)
 	if len(fields) != 7 || fields[0] != "runner.os" || fields[1] != "==" || fields[2] != "'Windows'" ||
 		fields[3] != "&&" || fields[4] != "matrix.shard" || fields[5] != "==" {
 		return ""
@@ -447,6 +492,32 @@ func goTestTimeout(t *testing.T, command workflowCommand) time.Duration {
 	return 0
 }
 
+func unquoteWorkflowArg(arg string) string {
+	if len(arg) >= 2 && (arg[0] == '"' || arg[0] == '\'') && arg[len(arg)-1] == arg[0] {
+		return arg[1 : len(arg)-1]
+	}
+	return arg
+}
+
+type namedTestShard struct {
+	name string
+	run  *regexp.Regexp
+	skip *regexp.Regexp
+}
+
+func (s namedTestShard) selects(test string) bool {
+	return (s.run == nil || s.run.MatchString(test)) && (s.skip == nil || !s.skip.MatchString(test))
+}
+
+type windowsNamedShardSpec struct {
+	kind    string
+	dir     string
+	runKey  string
+	skipKey string
+	runEnv  string
+	skipEnv string
+}
+
 func goTestRunPattern(t *testing.T, command workflowCommand) string {
 	t.Helper()
 	for i, arg := range command.args[1:] {
@@ -459,8 +530,6 @@ func goTestRunPattern(t *testing.T, command workflowCommand) string {
 		default:
 			continue
 		}
-		// The workflow quotes the pattern for the runner shell; the typed
-		// view keeps the raw token.
 		return strings.Trim(value, "'\"")
 	}
 	return ""
@@ -483,21 +552,14 @@ func goTestListTests(t *testing.T, pkg string) []string {
 	return names
 }
 
-// The steps shard runs its packages twice - once per test-name-initial slice -
-// so a test could silently drop out of Windows CI by matching neither -run
-// pattern, or run twice by matching both. Pin the partition the same way the
-// package sets are pinned: resolve every top-level test through `go test
-// -list`, require each to belong to exactly one slice, and require the slices
-// to stay within 30-70% of the tests so growth cannot pile onto one slice's
-// 15m binary budget. Benchmarks are excluded on purpose: go test never runs
-// them without -bench, so no slice can drop one.
+// Keep the fork's steps partition exhaustive and balanced across fresh binaries.
 func requireStepsSlicesCoverEveryTest(t *testing.T, sliceCommands []workflowCommand, packages []string) {
 	t.Helper()
 	var patterns []*regexp.Regexp
 	for _, command := range sliceCommands {
 		raw := goTestRunPattern(t, command)
 		if raw == "" {
-			t.Fatalf("steps slice command at step %d must pass exactly one explicit -run pattern; without it the slices overlap or drop tests", command.step)
+			t.Fatalf("steps slice command at step %d must pass an explicit -run pattern", command.step)
 		}
 		compiled, err := regexp.Compile(raw)
 		if err != nil {
@@ -506,7 +568,7 @@ func requireStepsSlicesCoverEveryTest(t *testing.T, sliceCommands []workflowComm
 		patterns = append(patterns, compiled)
 	}
 	if patterns[0].String() == patterns[1].String() {
-		t.Fatalf("steps slice -run patterns are identical (%q); the second slice would only re-run the first", patterns[0])
+		t.Fatalf("steps slice -run patterns are identical (%q)", patterns[0])
 	}
 	counts := make([]int, len(patterns))
 	for _, pkg := range packages {
@@ -515,25 +577,170 @@ func requireStepsSlicesCoverEveryTest(t *testing.T, sliceCommands []workflowComm
 			for i, pattern := range patterns {
 				if pattern.MatchString(name) {
 					if matched >= 0 {
-						t.Fatalf("%s in %s matches steps slice patterns %q and %q; a test must belong to exactly one slice", name, pkg, patterns[0], patterns[1])
+						t.Fatalf("%s in %s matches both steps slice patterns", name, pkg)
 					}
 					matched = i
 				}
 			}
 			if matched < 0 {
-				t.Fatalf("%s in %s matches neither steps slice pattern (%q, %q); Windows CI would never run it", name, pkg, patterns[0], patterns[1])
+				t.Fatalf("%s in %s matches neither steps slice pattern", name, pkg)
 			}
 			counts[matched]++
 		}
 	}
 	total := counts[0] + counts[1]
 	if total == 0 {
-		t.Fatal("go test -list resolved zero tests across the steps packages; the partition check would be vacuous")
+		t.Fatal("go test -list resolved zero steps tests; partition check would be vacuous")
 	}
 	for i, count := range counts {
 		fraction := float64(count) / float64(total)
 		if fraction < 0.3 || fraction > 0.7 {
-			t.Fatalf("steps slice %q holds %d of %d tests (%.0f%%); slices must stay within 30-70%% so one binary cannot creep back toward its 15m budget", patterns[i], count, total, fraction*100)
+			t.Fatalf("steps slice %q holds %d of %d tests (%.0f%%); keep slices within 30-70%%", patterns[i], count, total, fraction*100)
 		}
 	}
+}
+
+func TestCIWorkflow_WindowsDaemonShardsRunEveryTestExactlyOnce(t *testing.T) {
+	t.Parallel()
+	assertWindowsNamedShardsCoverEveryTest(t, windowsNamedShardSpec{
+		kind:    "daemon",
+		dir:     filepath.Join("internal", "daemon"),
+		runKey:  "daemon_run",
+		skipKey: "daemon_skip",
+		runEnv:  "NM_CI_WINDOWS_DAEMON_RUN",
+		skipEnv: "NM_CI_WINDOWS_DAEMON_SKIP",
+	})
+}
+
+func TestCIWorkflow_WindowsGateShardsRunEveryTestExactlyOnce(t *testing.T) {
+	t.Parallel()
+	assertWindowsNamedShardsCoverEveryTest(t, windowsNamedShardSpec{
+		kind:    "gate",
+		dir:     filepath.Join("internal", "gate"),
+		runKey:  "gate_run",
+		skipKey: "gate_skip",
+		runEnv:  "NM_CI_WINDOWS_GATE_RUN",
+		skipEnv: "NM_CI_WINDOWS_GATE_SKIP",
+	})
+}
+
+func assertWindowsNamedShardsCoverEveryTest(t *testing.T, spec windowsNamedShardSpec) {
+	t.Helper()
+
+	job := ciTestJob(t)
+	var shards []namedTestShard
+	for _, row := range job.Strategy.Matrix.Include {
+		if row["os"] != "windows-latest" || row["shard"] != spec.kind {
+			continue
+		}
+		shards = append(shards, namedTestShard{
+			name: row["name"],
+			run:  namedShardPattern(t, row, spec.runKey),
+			skip: namedShardPattern(t, row, spec.skipKey),
+		})
+	}
+	if len(shards) < 2 {
+		t.Fatalf("%s runs on %d Windows matrix rows; want it split across more than one so each go test binary stays well inside -timeout", spec.kind, len(shards))
+	}
+
+	var commands []workflowCommand
+	for _, command := range windowsGoTestCommands(t) {
+		if matrixShardCondition(job.Steps[command.step].If) == spec.kind {
+			commands = append(commands, command)
+		}
+	}
+	if len(commands) != 1 {
+		t.Fatalf("want one Windows go test command for the %s rows, got %d", spec.kind, len(commands))
+	}
+	command := commands[0]
+	step := job.Steps[command.step]
+	if step.Shell != "pwsh" {
+		t.Fatalf("%s shard step must run with pwsh so $env: expands, got shell %q", spec.kind, step.Shell)
+	}
+	for flag, wiring := range map[string]struct{ env, matrix string }{
+		"-run":  {spec.runEnv, spec.runKey},
+		"-skip": {spec.skipEnv, spec.skipKey},
+	} {
+		if got, want := step.Env[wiring.env], "${{ matrix."+wiring.matrix+" }}"; got != want {
+			t.Errorf("%s shard env %s = %q, want %q", spec.kind, wiring.env, got, want)
+		}
+		arg := flag + "=$env:" + wiring.env
+		if !slices.ContainsFunc(command.args, func(a string) bool { return unquoteWorkflowArg(a) == arg }) {
+			t.Errorf("%s shard go test must pass %q so the matrix partition reaches the test binary, got %v", spec.kind, arg, command.args)
+		}
+	}
+
+	names := append(declaredTestNames(t, spec.dir), "Test", "Test_Probe")
+	for c := 'A'; c <= 'Z'; c++ {
+		names = append(names, "Test"+string(c)+"Probe")
+	}
+	for c := '0'; c <= '9'; c++ {
+		names = append(names, "Test"+string(c)+"Probe")
+	}
+	for _, name := range names {
+		var selectedBy []string
+		for _, shard := range shards {
+			if shard.selects(name) {
+				selectedBy = append(selectedBy, shard.name)
+			}
+		}
+		if len(selectedBy) != 1 {
+			t.Errorf("%s is selected by Windows %s shards %v; every test must run in exactly one", name, spec.kind, selectedBy)
+		}
+	}
+}
+
+func namedShardPattern(t *testing.T, row map[string]string, key string) *regexp.Regexp {
+	t.Helper()
+	pattern := row[key]
+	if pattern == "" {
+		return nil
+	}
+	if strings.Contains(pattern, "/") {
+		t.Fatalf("matrix row %q %s %q contains /, which go test splits into subtest levels", row["name"], key, pattern)
+	}
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		t.Fatalf("matrix row %q %s %q: %v", row["name"], key, pattern, err)
+	}
+	return compiled
+}
+
+func declaredTestNames(t *testing.T, root string) []string {
+	t.Helper()
+	var names []string
+	fset := token.NewFileSet()
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, "_test.go") {
+			return err
+		}
+		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if ok && fn.Recv == nil && isGoTestName(fn.Name.Name) {
+				names = append(names, fn.Name.Name)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("collect test names under %s: %v", root, err)
+	}
+	if len(names) == 0 {
+		t.Fatalf("found no tests under %s", root)
+	}
+	return names
+}
+
+func isGoTestName(name string) bool {
+	for _, prefix := range []string{"Test", "Fuzz", "Example"} {
+		rest, ok := strings.CutPrefix(name, prefix)
+		if ok && (rest == "" || !(rest[0] >= 'a' && rest[0] <= 'z')) {
+			return name != "TestMain"
+		}
+	}
+	return false
 }
