@@ -339,6 +339,8 @@ func escapedStdoutHolder(t *testing.T, dir string) string {
 // schema (runTestAnalyzer). Under exactly those options a cleanly exited agent
 // whose result was fully written must finish even when an escaped descendant
 // keeps stdout open until WaitDelay force-closes it.
+// Keep these lifecycle cases serial: concurrent fork/exec can inherit another
+// case's writable script descriptor before exec closes it, causing ETXTBSY.
 func TestNativeAgents_FinishedResultSurvivesEscapedStdoutHolder(t *testing.T) {
 	schema := json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`)
 	tests := []struct {
@@ -357,7 +359,6 @@ func TestNativeAgents_FinishedResultSurvivesEscapedStdoutHolder(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			dir := t.TempDir()
 			res, err := tt.run(t, dir, escapedStdoutHolder(t, dir))
 			if err != nil {
@@ -374,6 +375,7 @@ func TestNativeAgents_FinishedResultSurvivesEscapedStdoutHolder(t *testing.T) {
 // agent that wrote its result but left a child in its own process group still
 // running is refused, because the owned-children probe runs before WaitDelay can
 // turn the run into a swallowable ErrWaitDelay.
+// Run serially for the same script-descriptor reason as the escaped-holder cases.
 func TestNativeAgents_RequireCompletedChildrenRefusesActiveOwnedChild(t *testing.T) {
 	schema := json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`)
 	tests := []struct {
@@ -392,7 +394,6 @@ func TestNativeAgents_RequireCompletedChildrenRefusesActiveOwnedChild(t *testing
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			dir := t.TempDir()
 			_, err := tt.run(t, dir, ownedStdoutHolder(t, dir))
 			if errors.Is(err, context.DeadlineExceeded) && strings.Contains(err.Error(), "native check completion is unverified:") {
@@ -418,6 +419,7 @@ func TestNativeAgents_RequireCompletedChildrenRefusesActiveOwnedChild(t *testing
 // still finishing when the leader exited must not fail the run - the bounded
 // re-probe sees it leave inside the settle window. A single-shot probe (the
 // old behavior) refused this shape outright.
+// Run serially for the same script-descriptor reason as the escaped-holder cases.
 func TestNativeAgents_RequireCompletedChildrenAcceptsFinishingOwnedChild(t *testing.T) {
 	schema := json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`)
 	tests := []struct {
@@ -436,7 +438,6 @@ func TestNativeAgents_RequireCompletedChildrenAcceptsFinishingOwnedChild(t *test
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			dir := t.TempDir()
 			res, err := tt.run(t, dir, finishingOwnedChild(t, dir))
 			if err != nil {
