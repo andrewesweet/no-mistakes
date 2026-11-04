@@ -283,8 +283,9 @@ func ReviewBotsFor(requiredReviews []string) []ReviewBot {
 }
 
 // ReviewBotForCheck authenticates the check publisher among bots. CodeRabbit
-// requires GitHub.com's fixed app ID or a verified required-review check carrying
-// its trusted GHES instance ID; Greptile retains slug matching.
+// requires GitHub.com's fixed app ID or a synthesized required-review check from
+// the forge adapter's trusted-identity path (GHES app or GitLab account).
+// Greptile retains slug matching.
 func ReviewBotForCheck(bots []ReviewBot, check Check) (ReviewBot, bool) {
 	for _, bot := range bots {
 		if bot.AppID != 0 {

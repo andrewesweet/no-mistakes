@@ -331,7 +331,7 @@ Disable telemetry collection.
 
 When set to a disabling value, telemetry stays off even if a runtime or embedded website ID is available.
 
-On macOS and Linux, set this variable before `no-mistakes init` to include it in the managed daemon's service definition. To change an existing installation, export the new value and run `no-mistakes daemon restart`. Service refreshes and binary upgrades preserve the stored value when the current shell has no nonempty value. To re-enable telemetry, explicitly set `NO_MISTAKES_TELEMETRY=1` and restart the daemon. Windows Task Scheduler inherits the user's logon environment, so set it there for the managed daemon.
+On macOS and Linux, set this variable before `no-mistakes init` to include it in the managed daemon's service definition. To change an existing installation, export the new value and run `no-mistakes daemon restart`. Service refreshes and binary upgrades preserve the stored value when the current shell has no nonempty value. A disabling value inherited by the daemon survives its login-shell probe; an enabling value still permits the login shell to disable telemetry. To re-enable telemetry, remove any login-shell opt-out, explicitly set `NO_MISTAKES_TELEMETRY=1`, and restart the daemon. Windows Task Scheduler inherits the user's logon environment, so set it there for the managed daemon.
 
 ## Environment the daemon sees
 

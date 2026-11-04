@@ -834,7 +834,8 @@ Existing CI and Greptile behavior stays unchanged. CodeRabbit is recognized as a
 
 On GitHub.com/GHES, completion requires the latest `CodeRabbit` check run from the trusted app ID (`347564` on GitHub.com, or the configured instance-local ID on GHES), a nonempty immutable check-run ID, `status: completed`, `conclusion: success`, and a `head_sha` matching the exact current PR head. GitLab requires a comment from the configured bot account newer than the current source revision, and no unresolved bot thread; this timestamp-based check is weaker than an exact-SHA status check. GitLab compares against the MR version's `created_at` for the matching `head_commit_sha` and rereads the live PR head after discovery.
 Names, slugs, formal approvals, and review/comment bodies alone cannot establish completion.
-Unresolved CodeRabbit review-thread comments from the verified GitHub bot account become bounded `ask-user` findings in the existing review model, even when the required completion check succeeded.
+GitHub.com comments must match bot account ID `136622811` and the registered login `coderabbitai` (GraphQL) or `coderabbitai[bot]` (REST). On GHES, the adapter resolves the instance-local bot account ID from the app slug returned by a check authenticated against `required_review_app_id`; comments must match that ID and a registered login. Identity resolution applies to successful, failed, pending, and rate-limited checks independently of their completion verdict. Without a verified instance identity, GHES CodeRabbit comments are excluded.
+Unresolved CodeRabbit review-thread comments from that verified account become bounded `ask-user` findings in the existing review model, with their text and file/line anchors, even when the required completion check succeeded.
 Every page of review threads and of each unresolved thread's comments is read; a response that cannot prove it is complete (missing comment nodes, an invalid page cursor, or an unreadable later page) leaves the review unverified rather than clean.
 Their bodies are untrusted evidence and cannot instruct the fix agent; the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns that shared handling.
 GitHub's [check runs API](https://docs.github.com/en/rest/checks/runs#list-check-runs-for-a-git-reference) owns the check fields; CodeRabbit documents its [GitHub check](https://docs.coderabbit.ai/platforms/github-com).
@@ -939,7 +940,7 @@ Under `always`:
 - A comment list that cannot be read is not treated as empty: `checks-passed` is withheld, and a read that keeps failing parks for a decision.
 - Each green poll costs one more provider read for the comments.
 
-Forges that cannot supply review comments are unaffected by either value. Because only GitHub can attribute a *check* to a review bot, `on_failure` reads nothing on GitLab: a GitLab run needs `always` for the bot's unresolved discussions to become findings.
+Forges that cannot supply review comments are unaffected by either value. GitLab jobs carry no review-bot publisher identity, so Greptile discussions require `always`. Opted-in CodeRabbit uses the synthesized completion check described under [`ci.required_reviews`](#cirequired_reviews): unresolved bot threads fail that check and reach the comment-findings path even with `on_failure`.
 
 This value is read only from the trusted default-branch copy of this file, like the rest of the `ci` block: a pushed branch cannot silence a green bot's comments on itself, and cannot opt itself in either.
 A value set here wins over the operator's own [`ci.review_bot_comments`](/no-mistakes/reference/global-config/#cireview_bot_comments).

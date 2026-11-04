@@ -64,10 +64,9 @@ func CIFalseNegativesFromRun(database *db.DB, runID string) ([]FindingGold, erro
 	if err != nil {
 		return nil, fmt.Errorf("read source run: %w", err)
 	}
-	// Successful terminal statuses qualify: a run that ended because the PR merged or
-	// closed, and one that reached its checks-passed verdict and released the
-	// lane while the PR stayed open. A checks_passed run is precisely the run
-	// whose CI readiness is the recorded verdict.
+	// Successful terminal statuses qualify, including an explicit handoff with
+	// the PR still open. Every path still requires recorded CI readiness below;
+	// handoff alone is not evidence that a repair cleared the checks.
 	if run == nil || (run.Status != types.RunCompleted && run.Status != types.RunChecksPassed && run.Status != types.RunHandedOff) || run.CIReadyAt == nil || run.CIReadyNoCI {
 		return nil, nil
 	}

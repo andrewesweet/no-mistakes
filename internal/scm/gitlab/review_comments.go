@@ -102,8 +102,9 @@ func ProjectPathFromMRURL(raw string) string {
 // notes, and only a diff note is resolvable at all: a general MR comment
 // reports resolvable=false and can never be a review finding. And a bot posts
 // as an ordinary account here - there are no GitHub App slugs and no "[bot]"
-// login spelling - so identity comes from the registered review-bot logins
-// (scm.IsReviewBotLogin), never from an application name.
+// login spelling - so Greptile uses its registered review-bot login, while
+// opted-in CodeRabbit uses the trusted instance-local account ID. Neither uses
+// an application name as proof of comment authorship.
 func (h *Host) GetReviewComments(ctx context.Context, pr *scm.PR) ([]scm.ReviewComment, error) {
 	project, iid, err := h.reviewCommentTarget(ctx, pr)
 	if err != nil {
