@@ -1162,21 +1162,7 @@ Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `p
 
 Configure deterministic checks for explicit, inherited, or inferred run intent. This block is read only from the trusted default branch, regardless of `allow_repo_commands`; other intent-extraction fields keep their existing pushed-branch behavior.
 
-```yaml
-intent:
-  check:
-    mode: reject # off (default) | warn | reject
-    terms:
-      - "internal project label"
-    patterns:
-      - '(?i)run-[a-z0-9-]+'
-```
-
-`terms` match case-insensitive literal substrings. `patterns` use Go RE2 regular expressions and are case-sensitive unless the expression enables `(?i)`. Global and trusted repository rules combine additively; the stronger mode wins, so a repository cannot turn off a global warning or rejection. A pushed-branch policy cannot add, remove, or weaken rules.
-
-`off` performs no checks. `warn` records a private local warning and continues. `reject` stops the run before it can supersede another run or launch an agent. The same policy checks intent inferred later from a transcript before the summary is stored. `--skip intent` does not bypass the check. Warnings, errors, and logs name only rule indexes, never the matched text; warnings are not published as findings.
-
-Each config layer accepts at most 32 terms and patterns combined, at most 256 bytes per rule, and at most 8 KiB of rule text. Invalid modes, empty or oversized rules, over-limit policies, and invalid RE2 expressions fail config loading.
+The [global `intent.check` reference](/no-mistakes/reference/global-config/#intentcheck) owns the shared syntax, modes, matching rules, additive policy precedence, admission behavior, privacy guarantees, and limits.
 
 ### test.prepare
 

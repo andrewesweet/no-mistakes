@@ -1481,6 +1481,14 @@ Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `p
 
 `intent.publish_intent: false` is a global, operator-side default that keeps the generated `## Intent` section out of the PR body for runs started without an explicit override. It is the caller-side counterpart of the repository's trusted [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent): both are tighten-only, the repository's trusted policy remains the ceiling a caller can never exceed, and review, test, document, lint, and CI auto-fix prompts keep the full intent. Under the caller-side omission the PR-drafting turns receive no intent text at all and draft from the diff and commit messages only; the intent is withheld from them, never scanned out of their output. A run records the folded decision (the `axi run --no-publish-intent` flag OR this global default) at start; reruns inherit it, and a mid-run config change never re-publishes. This field is global-only: a pushed branch's `.no-mistakes.yaml` cannot express it.
 
+The match score is the share of matching files mentioned in a transcript session; deleted files are ignored when the diff also contains non-deleted changes.
+All-deletion diffs still match against the deleted changed files.
+Mentioning extra files does not reduce the score.
+For multi-file diffs, no-mistakes still requires at least two overlapping files and an effective minimum score of `0.5`.
+Partial matches older than 24 hours are rejected unless their raw score is at least `0.8`.
+If exactly one accepted candidate has a raw score of at least `0.85`, that decisive candidate wins before recency ranking.
+Otherwise, accepted candidates are ranked by confidence, which combines the raw score with a small recency boost, with ties going to the most recent matching session, and ambiguous accepted candidates may be disambiguated by the configured pipeline agent.
+
 #### intent.check
 
 Configure deterministic rules that warn about or reject run intent before pipeline agents act on it. The same `intent.check` block is available in global config and the repository's trusted default-branch config. Global and trusted repository rules combine additively; the stronger mode wins. A pushed branch cannot add, remove, or weaken rules, even when `allow_repo_commands: true`.
@@ -1500,14 +1508,6 @@ intent:
 `off` performs no checks. `warn` writes a private local warning and continues. `reject` stops the run. Warning, error, and log messages list matching rule indexes only; they never echo matched text. Warnings are not findings and are never published.
 
 Each config layer accepts at most 32 terms and patterns combined, at most 256 bytes per rule, and at most 8 KiB of rule text. Invalid modes, empty or oversized rules, over-limit policies, and invalid RE2 expressions fail config loading. The default is `off`; leaving `intent.check` unset preserves existing behavior.
-
-The match score is the share of matching files mentioned in a transcript session; deleted files are ignored when the diff also contains non-deleted changes.
-All-deletion diffs still match against the deleted changed files.
-Mentioning extra files does not reduce the score.
-For multi-file diffs, no-mistakes still requires at least two overlapping files and an effective minimum score of `0.5`.
-Partial matches older than 24 hours are rejected unless their raw score is at least `0.8`.
-If exactly one accepted candidate has a raw score of at least `0.85`, that decisive candidate wins before recency ranking.
-Otherwise, accepted candidates are ranked by confidence, which combines the raw score with a small recency boost, with ties going to the most recent matching session, and ambiguous accepted candidates may be disambiguated by the configured pipeline agent.
 
 ### test.evidence
 
