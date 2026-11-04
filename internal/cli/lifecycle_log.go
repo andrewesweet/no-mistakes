@@ -46,7 +46,7 @@ func parentCommandLine(ppid int) string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "ps", "-o", "command=", "-p", fmt.Sprint(ppid))
+	cmd := exec.CommandContext(ctx, "ps", "-o", "comm=", "-p", fmt.Sprint(ppid))
 	winproc.Harden(cmd)
 	out, err := cmd.Output()
 	if err != nil {

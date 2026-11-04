@@ -26,7 +26,7 @@ const groupMemberReportLimit = 4
 const groupMemberCommandLimit = 120
 
 // groupMember names one process still inside a command's process group or
-// job after the leader exited. command is the member's command line on Unix
+// job after the leader exited. command is the member's executable name on Unix
 // or its image path on Windows; it is empty when the platform probe could
 // not read it.
 type groupMember struct {
@@ -35,7 +35,7 @@ type groupMember struct {
 }
 
 // formatGroupMembers renders the surviving members an active verdict names:
-// "pid 39456 (sleep 1.2), pid 66195", bounded to groupMemberReportLimit with
+// "pid 39456 (sleep), pid 66195", bounded to groupMemberReportLimit with
 // a trailing "and N more" when the list was longer.
 func formatGroupMembers(members []groupMember) string {
 	names := make([]string, 0, min(len(members), groupMemberReportLimit)+1)

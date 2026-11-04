@@ -103,7 +103,7 @@ func TestShellCommandGroupActiveTimeoutKeepsLastObservedMember(t *testing.T) {
 		_, detail, err := shellCommandGroupActive(cmd, 2*time.Second, func(ctx context.Context) ([]byte, error) {
 			calls++
 			if calls == 1 {
-				return fmt.Appendf(nil, "%d S 4242 sleep 30\n", pgid), nil
+				return fmt.Appendf(nil, "%d S 4242 sleep\n", pgid), nil
 			}
 			// The final probe gets only the remaining window and stalls
 			// past it; the refusal must still name the member the last
@@ -114,7 +114,7 @@ func TestShellCommandGroupActiveTimeoutKeepsLastObservedMember(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("err=%v; want unverified completion from deadline error", err)
 		}
-		if !strings.Contains(detail, "pid 4242") || !strings.Contains(detail, "sleep 30") {
+		if !strings.Contains(detail, "pid 4242") || !strings.Contains(detail, "(sleep)") {
 			t.Fatalf("detail=%q; want the last observed member named", detail)
 		}
 	})

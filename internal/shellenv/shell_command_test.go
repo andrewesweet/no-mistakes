@@ -15,8 +15,8 @@ func TestFormatGroupMembers(t *testing.T) {
 		{name: "no members", want: ""},
 		{
 			name:    "pid and command",
-			members: []groupMember{{pid: 39456, command: "sleep 1.2"}},
-			want:    "pid 39456 (sleep 1.2)",
+			members: []groupMember{{pid: 39456, command: "sleep"}},
+			want:    "pid 39456 (sleep)",
 		},
 		{
 			name:    "missing command degrades to the pid",
@@ -26,10 +26,10 @@ func TestFormatGroupMembers(t *testing.T) {
 		{
 			name: "several members join",
 			members: []groupMember{
-				{pid: 39456, command: "sleep 1.2"},
+				{pid: 39456, command: "sleep"},
 				{pid: 66195, command: `C:\agent\child.exe`},
 			},
-			want: `pid 39456 (sleep 1.2), pid 66195 (C:\agent\child.exe)`,
+			want: `pid 39456 (sleep), pid 66195 (C:\agent\child.exe)`,
 		},
 	}
 	for _, tt := range tests {

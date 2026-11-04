@@ -238,7 +238,7 @@ func probeShellCommandGroup(pgid int, timeout time.Duration, ps func(context.Con
 }
 
 func shellCommandGroupPS(ctx context.Context) ([]byte, error) {
-	probe := exec.CommandContext(ctx, "ps", "-eo", "pgid=,stat=,pid=,command=")
+	probe := exec.CommandContext(ctx, "ps", "-eo", "pgid=,stat=,pid=,comm=")
 	ConfigureShellCommand(probe)
 	return OutputShellCommand(probe)
 }

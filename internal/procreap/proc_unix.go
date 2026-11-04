@@ -30,7 +30,7 @@ const cwdLookupTimeout = 10 * time.Second
 // so one implementation covers macOS and Linux, matching how the daemon's
 // other process inspection works (internal/daemon/proc_unix.go).
 func listProcesses() ([]Process, error) {
-	cmd := exec.Command(psExecutable(), "-ww", "-eo", "pid=,ppid=,pgid=,etime=,command=")
+	cmd := exec.Command(psExecutable(), "-ww", "-eo", "pid=,ppid=,pgid=,etime=,comm=")
 	cmd.Env = cEnv()
 	out, err := cmd.Output()
 	if err != nil {
@@ -64,7 +64,7 @@ func listProcessStates() ([]processState, error) {
 	return procs, nil
 }
 
-// parseProcessTable turns `ps -eo pid=,ppid=,pgid=,etime=,command=` output
+// parseProcessTable turns `ps -eo pid=,ppid=,pgid=,etime=,comm=` output
 // into Process values. Lines it cannot parse are skipped: a partially
 // readable table is still useful, and an unreadable line must never abort the
 // sweep.
@@ -91,8 +91,6 @@ func parseProcessTable(out string) []Process {
 		if err != nil {
 			continue
 		}
-		// Rejoin the command from the original line so embedded runs of
-		// whitespace inside arguments survive.
 		idx := strings.Index(line, fields[3])
 		command := strings.TrimSpace(line[idx+len(fields[3]):])
 		procs = append(procs, Process{

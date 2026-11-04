@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1592,7 +1593,7 @@ func (h *Host) getReviewComments(ctx context.Context, pr *scm.PR, verifiedBotUse
 		return nil, errors.New("expected positive GitHub pull request number")
 	}
 
-	if verifiedBotUserID == 0 && h.host != "" && !strings.EqualFold(h.host, "github.com") && h.requiredReviewAppID > 0 {
+	if verifiedBotUserID == 0 && h.host != "" && !strings.EqualFold(h.host, "github.com") && h.requiredReviewAppID > 0 && slices.Contains(h.requiredReviews, "coderabbit") {
 		reviewHost := *h
 		if reviewHost.repo == "" {
 			reviewHost.repo = repo

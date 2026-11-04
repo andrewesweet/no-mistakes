@@ -107,7 +107,7 @@ func TestShellCommandGroupActiveAcceptsMemberFinishingInsideWindow(t *testing.T)
 	if err != nil || !active {
 		t.Fatalf("single probe: active=%v detail=%q err=%v, want the finishing member reported", active, detail, err)
 	}
-	if !strings.Contains(detail, "(sleep 0.5)") {
+	if !strings.Contains(detail, "(sleep)") {
 		t.Fatalf("single probe detail = %q, want the member's pid and command", detail)
 	}
 
@@ -144,7 +144,7 @@ func TestShellCommandGroupActiveRefusesMemberSurvivingWindow(t *testing.T) {
 	// Check identity independently of the bounded wait: a last ps probe
 	// may legitimately time out and refuse completion as unverified instead.
 	active, detail, err := ShellCommandGroupActive(cmd, 0)
-	if err != nil || !active || !strings.Contains(detail, "pid "+strconv.Itoa(memberPID)) || !strings.Contains(detail, "(sleep 30)") {
+	if err != nil || !active || !strings.Contains(detail, "pid "+strconv.Itoa(memberPID)) || !strings.Contains(detail, "(sleep)") {
 		t.Fatalf("active=%v detail=%q err=%v, want pid %d and its command named", active, detail, err, memberPID)
 	}
 	const window = 400 * time.Millisecond
@@ -159,6 +159,55 @@ func TestShellCommandGroupActiveRefusesMemberSurvivingWindow(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed < window {
 		t.Fatalf("re-probe returned after %s, before the %s window elapsed", elapsed, window)
+	}
+}
+
+func TestShellCommandGroupActiveDiagnosticsExcludeArguments(t *testing.T) {
+	for _, lastObserved := range []bool{false, true} {
+		t.Run("last_observed="+strconv.FormatBool(lastObserved), func(t *testing.T) {
+			const credential = "Authorization: Bearer diagnostic-secret"
+			pidFile := filepath.Join(t.TempDir(), "member.pid")
+			cmd := exec.CommandContext(context.Background(), "/bin/sh", "-c",
+				`/bin/sh -c 'while :; do sleep 30; done' "$1" >/dev/null 2>&1 & echo $! > "$2"`,
+				"leader", credential, pidFile)
+			ConfigureShellCommand(cmd)
+			if err := StartShellCommand(cmd); err != nil {
+				t.Fatal(err)
+			}
+			defer TerminateShellCommandGroup(cmd)
+			if err := cmd.Wait(); err != nil {
+				t.Fatal(err)
+			}
+			memberPID := readPID(t, pidFile, 5*time.Second)
+			var active bool
+			var detail string
+			var err error
+			if lastObserved {
+				probeErr := errors.New("process probe unavailable")
+				calls := 0
+				_, detail, err = shellCommandGroupActive(cmd, time.Second, func(ctx context.Context) ([]byte, error) {
+					calls++
+					if calls == 1 {
+						return shellCommandGroupPS(ctx)
+					}
+					return nil, probeErr
+				})
+				if !errors.Is(err, probeErr) {
+					t.Fatalf("err=%v, want failed probe", err)
+				}
+			} else {
+				active, detail, err = ShellCommandGroupActive(cmd, 0)
+				if err != nil || !active {
+					t.Fatalf("active=%t err=%v, want live member", active, err)
+				}
+			}
+			if !strings.Contains(detail, "pid "+strconv.Itoa(memberPID)) || !strings.Contains(detail, "sh") {
+				t.Fatalf("detail=%q, want surviving shell identified", detail)
+			}
+			if strings.Contains(detail, "Authorization") || strings.Contains(detail, "diagnostic-secret") || strings.Contains(detail, "while :") {
+				t.Fatalf("process arguments leaked: %q", detail)
+			}
+		})
 	}
 }
 

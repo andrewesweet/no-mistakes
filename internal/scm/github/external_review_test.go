@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -371,6 +372,34 @@ func TestHost_GetReviewCommentsResolvesGHESIdentity(t *testing.T) {
 				if comments[i] != want[i] {
 					t.Errorf("comment %d=%+v, want %+v", i, comments[i], want[i])
 				}
+			}
+		})
+	}
+}
+
+func TestHost_GetReviewCommentsSkipsUnrequiredGHESDiscovery(t *testing.T) {
+	t.Parallel()
+	for _, reviewers := range [][]string{nil, {}, {"other"}} {
+		t.Run(strings.Join(reviewers, ",")+"_nil="+strconv.FormatBool(reviewers == nil), func(t *testing.T) {
+			t.Parallel()
+			command := "gh api --hostname ghe.example.com graphql -f query=" + reviewThreadsQuery + " -F owner=test -F name=repo -F number=42"
+			threads := `{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+ {"isResolved":false,"comments":{"nodes":[
+  {"databaseId":1,"body":"unverified","author":{"login":"coderabbitai","databaseId":12345}},
+  {"databaseId":2,"body":"Fix the nil pointer","path":"main.go","line":7,"author":{"login":"greptile-apps[bot]"}}
+ ]}}
+ ],"pageInfo":{"hasNextPage":false}}}}}}`
+			factory := githubTestCmdFactory(map[string]githubTestResponse{command: {stdout: threads}})
+			host := New(func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				if name+" "+strings.Join(args, " ") != command {
+					t.Errorf("CodeRabbit opt-out made an extra forge request: %s %v", name, args)
+				}
+				return factory(ctx, name, args...)
+			}, nil, "ghe.example.com", "test/repo").WithRequiredReviews(reviewers, 987)
+			comments, err := host.GetReviewComments(context.Background(), &scm.PR{Number: "42"})
+			want := scm.ReviewComment{ID: "2", Author: "greptile-apps[bot]", Body: "Fix the nil pointer", Path: "main.go", Line: 7}
+			if err != nil || len(comments) != 1 || comments[0] != want {
+				t.Fatalf("comments=%+v err=%v, want unrelated review finding %+v", comments, err, want)
 			}
 		})
 	}
