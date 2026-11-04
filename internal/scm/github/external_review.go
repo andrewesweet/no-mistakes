@@ -126,6 +126,10 @@ func (h *Host) getExternalReview(ctx context.Context, pr *scm.PR, reviewer strin
 				return result, fmt.Errorf("external review check identity or head could not be verified")
 			}
 			seen[run.ID] = true
+			if run.App.Slug == "" {
+				return result, fmt.Errorf("external review app slug could not be verified")
+			}
+			appSlug = run.App.Slug
 			// Title is only a negative signal. Never promote arbitrary prose,
 			// a formal approval, or another check from this app to completion.
 			if run.Name == "Review rate limited" || run.Output.Title == "Review rate limited" {
@@ -139,10 +143,6 @@ func (h *Host) getExternalReview(ctx context.Context, pr *scm.PR, reviewer strin
 				continue
 			}
 			found = true
-			if run.App.Slug == "" {
-				return result, fmt.Errorf("external review app slug could not be verified")
-			}
-			appSlug = run.App.Slug
 			switch run.Status {
 			case "queued", "in_progress", "waiting", "pending", "requested":
 				pending = true
@@ -171,6 +171,8 @@ func (h *Host) getExternalReview(ctx context.Context, pr *scm.PR, reviewer strin
 		result.State = reviewCompletionPending
 	case found:
 		result.State = reviewCompletionComplete
+	}
+	if appSlug != "" {
 		if !strings.EqualFold(h.host, "github.com") {
 			authorOut, err := h.cmd(ctx, "gh", "api", "--hostname", h.host, "users/"+url.PathEscape(appSlug+"[bot]")).CombinedOutput()
 			if err != nil {

@@ -87,6 +87,9 @@ func TestExternalReviewCompletion(t *testing.T) {
 			if !tc.wantErr && (got.State != tc.state || got.HeadSHA != reviewHead) {
 				t.Fatalf("got %+v, want %s at head", got, tc.state)
 			}
+			if !tc.wantErr && got.AuthorID != scm.CodeRabbitAuthorID {
+				t.Fatalf("author=%d, want the verified app's user independently of review state", got.AuthorID)
+			}
 		})
 	}
 }
@@ -304,8 +307,14 @@ func TestHost_GetReviewCommentsResolvesGHESIdentity(t *testing.T) {
 		wantErr     bool
 		wantBots    bool
 		repoFromURL bool
+		change      func(map[string]any)
 	}{
 		{name: "pinned identity", pr: scm.PR{Number: "42", HeadSHA: reviewHead}, appID: 987, author: githubTestResponse{stdout: `{"id":12345}`}, wantBots: true},
+		{name: "failed review", pr: scm.PR{Number: "42", HeadSHA: reviewHead}, appID: 987, author: githubTestResponse{stdout: `{"id":12345}`}, wantBots: true, change: func(run map[string]any) { run["conclusion"] = "failure" }},
+		{name: "pending review", pr: scm.PR{Number: "42", HeadSHA: reviewHead}, appID: 987, author: githubTestResponse{stdout: `{"id":12345}`}, wantBots: true, change: func(run map[string]any) { run["status"] = "in_progress" }},
+		{name: "rate limited review", pr: scm.PR{Number: "42", HeadSHA: reviewHead}, appID: 987, author: githubTestResponse{stdout: `{"id":12345}`}, wantBots: true, change: func(run map[string]any) { run["name"] = "Review rate limited" }},
+		{name: "rate limit title", pr: scm.PR{Number: "42", HeadSHA: reviewHead}, appID: 987, author: githubTestResponse{stdout: `{"id":12345}`}, wantBots: true, change: func(run map[string]any) { run["output"] = map[string]any{"title": "Review rate limited"} }},
+		{name: "other check from verified app", pr: scm.PR{Number: "42", HeadSHA: reviewHead}, appID: 987, author: githubTestResponse{stdout: `{"id":12345}`}, wantBots: true, change: func(run map[string]any) { run["name"] = "pre-merge checks" }},
 		{name: "observed head outranks requested head", pr: scm.PR{Number: "42", HeadSHA: strings.Repeat("b", 40), ObservedHeadSHA: reviewHead}, appID: 987, author: githubTestResponse{stdout: `{"id":12345}`}, wantBots: true},
 		{name: "URL without head", pr: scm.PR{URL: "https://ghe.example.com/test/repo/pull/42"}, appID: 987, author: githubTestResponse{stdout: `{"id":12345}`}, wantBots: true},
 		{name: "repository from URL", pr: scm.PR{URL: "https://ghe.example.com/test/repo/pull/42"}, appID: 987, author: githubTestResponse{stdout: `{"id":12345}`}, wantBots: true, repoFromURL: true},
@@ -318,6 +327,9 @@ func TestHost_GetReviewCommentsResolvesGHESIdentity(t *testing.T) {
 			t.Parallel()
 			run := reviewRun()
 			run["app"] = map[string]any{"id": 987, "slug": "coderabbitai"}
+			if tc.change != nil {
+				tc.change(run)
+			}
 			host := New(githubTestCmdFactory(map[string]githubTestResponse{
 				reviewHeadCommand: {stdout: reviewHead},
 				"gh api --hostname ghe.example.com --method GET repos/test/repo/commits/" + reviewHead + "/check-runs -f app_id=987 -f filter=latest -f per_page=100 --paginate --slurp": {stdout: reviewPage(run)},

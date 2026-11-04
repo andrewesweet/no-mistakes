@@ -1554,6 +1554,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	var reviewApprovedHeadSHA string
 	var ciReadyNoCIOnCompletion *bool
 	var restartFrom types.StepName
+	handedOff := false
 
 	// Crash retries have a separate per-step budget, never a fix-round credit.
 	// It is not replenished by approval/fix rounds in this live execution.
@@ -1579,17 +1580,16 @@ rounds:
 		}
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()
+		contextCause := context.Cause(ctx)
+		handedOff = stepName == types.StepCI && err != nil && (errors.Is(err, ErrHandoff) || errors.Is(contextCause, ErrHandoff)) && (contextCause == nil || errors.Is(contextCause, ErrHandoff))
+		if handedOff {
+			if outcome == nil {
+				outcome = &StepOutcome{}
+			}
+			err = nil
+		}
 		if err != nil {
 			durationMS := executionMS + roundDuration
-			contextCause := context.Cause(ctx)
-			handoff := (errors.Is(err, ErrHandoff) || errors.Is(contextCause, ErrHandoff)) && (contextCause == nil || errors.Is(contextCause, ErrHandoff))
-			if stepName == types.StepCI && handoff {
-				if dbErr := e.db.CompleteStep(sr.ID, 0, durationMS, logPath); dbErr != nil {
-					return false, "", dbErr
-				}
-				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusCompleted), "", "", &durationMS)
-				return false, "", ErrHandoff
-			}
 			// Persist the failure reason to the step's own log file. The error
 			// often carries the only detail of why the step failed (e.g. git
 			// stderr from a rejected push); without this the step log shows the
@@ -1710,6 +1710,9 @@ rounds:
 		if outcome.PRURL != "" {
 			run.PRURL = &outcome.PRURL
 			e.emitRunEvent(ipc.EventRunUpdated, run, repo)
+		}
+		if handedOff {
+			break
 		}
 
 		// Check if auto-fix should be attempted.
@@ -2020,6 +2023,9 @@ done:
 	e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(status), "", "", &durationMS)
 	if stepName == types.StepCI && !stepSkipped && ciReadyNoCIOnCompletion != nil {
 		ciReadinessChanged(true, *ciReadyNoCIOnCompletion)
+	}
+	if handedOff {
+		return false, "", ErrHandoff
 	}
 	return skipRemaining, restartFrom, nil
 }

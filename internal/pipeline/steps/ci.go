@@ -317,6 +317,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	// interrupted: that repair is finished first and nothing new is requested.
 	repairRequested := sctx.Fixing && !retryRefusal
 	defer func() {
+		if outcome == nil && (errors.Is(err, pipeline.ErrHandoff) || errors.Is(context.Cause(sctx.Ctx), pipeline.ErrHandoff)) {
+			outcome = &pipeline.StepOutcome{}
+		}
 		if outcome != nil {
 			if s.fixAgentCrashes > 0 {
 				findings, parseErr := types.ParseFindingsJSON(outcome.Findings)
