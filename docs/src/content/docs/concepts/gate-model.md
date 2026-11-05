@@ -37,7 +37,7 @@ When you run `no-mistakes init` in a repo:
 4. It best-effort isolates the gate repo's hooks path from shared local Git config writes when Git supports `config --worktree`.
 5. It adds a `no-mistakes` remote to your working repo that points at the gate.
 6. When `--fork-url` is supplied, it records that GitHub fork as the branch push target while keeping `origin` as the parent repository used for PR bases.
-7. It installs or refreshes the `/no-mistakes` agent skill at user level, into `~/.claude/skills/no-mistakes/SKILL.md` and `~/.agents/skills/no-mistakes/SKILL.md`, on a best-effort basis, following existing symlinks between the home `.claude` and `.agents` skill directories. It writes no skill files into the repo; if the repo still carries a vendored copy from an older version, `init` prints a notice that the copy can be removed.
+7. It handles the user-level `/no-mistakes` agent skill as described in the [`init` reference](/no-mistakes/reference/cli/#no-mistakes-init), which owns installation and skip behavior.
 8. It makes sure the daemon is running so incoming pushes can start runs.
 
 `init` is idempotent.
@@ -64,7 +64,7 @@ That is a core design choice, not an implementation detail.
    While a step is actively running or fixing, AXI run objects can also show `active_steps` with the active duration, latest activity, native agent PID, and current execution or fix round.
 8. After local checks pass, the push step forwards the branch to the configured push target only after verifying that the update will not discard unincorporated commits already on that target, and the PR step creates or updates the pull request.
    For GitHub fork routing, the push target is the fork and the PR base repository is the parent from `origin`.
-9. The CI step keeps watching the open PR until it is merged, closed, or its configured idle timeout elapses with no base-branch movement, and can auto-fix failures or merge conflicts when supported. While it watches, the TUI and terminal title surface a `Checks passed` signal once checks are green and the PR is mergeable (or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) and no checks are registered), and `no-mistakes axi` returns `outcome: checks-passed` with instructions to summarize the run and list any pipeline fixes, so agents stop and ask you to review and merge it. An empty forge response without that declaration stays not-ready. Under [`ci.release_after_checks_pass`](/no-mistakes/reference/repo-config/#cirelease_after_checks_pass) the step instead records readiness and finishes at that verdict, so the run completes as `checks_passed`, releases its worktree, and leaves the merge decision - and any later observation of it - to you.
+9. The CI step keeps watching the open PR until it is merged, closed, explicitly handed off with [`no-mistakes axi handoff`](/no-mistakes/reference/cli/#no-mistakes-axi-handoff), or its configured idle timeout elapses with no base-branch movement, and can auto-fix failures or merge conflicts when supported. While it watches, the TUI and terminal title surface a `Checks passed` signal once checks are green and the PR is mergeable (or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) and no checks are registered), and `no-mistakes axi` returns `outcome: checks-passed` with instructions to summarize the run and list any pipeline fixes, so agents stop and ask you to review and merge it or explicitly hand it off. An empty forge response without that declaration stays not-ready. Under [`ci.release_after_checks_pass`](/no-mistakes/reference/repo-config/#cirelease_after_checks_pass) the step instead records readiness and finishes at that verdict, so the run completes as `checks_passed`, releases its worktree, and leaves the merge decision - and any later observation of it - to you.
 
 **Key design decisions:**
 
@@ -121,10 +121,15 @@ If survival cannot be proven, the whole private-only range is reported as at
 risk.
 
 **Recovery-anchor preservation credit (issue #1233):** a private-only commit
-that a `refs/no-mistakes/recover/<run>` anchor reaches is *preserved*, so it is
-re-derived out of the at-risk set. Those anchors are the tool's own sanctioned
-preservation record - terminalization pins every verified unpublished head at
-that ref before the managed worktree can be removed, and
+that a `refs/no-mistakes/recover/<run>` or
+`refs/no-mistakes/recover-rewritten/<run>/<generation>` anchor reaches is
+*preserved*, so it is re-derived out of the at-risk set. Those anchors are the
+tool's own sanctioned preservation record - terminalization pins every verified
+unpublished head under `recover/` before the managed worktree can be removed;
+rewritten-remote recovery pins each superseded push under `recover-rewritten/`
+in the invoking worktree or gate. Reconciliation consults both locations for
+rewritten recovery anchors, staging their verified objects in the gate without
+creating or replacing durable refs during planning.
 `custody.PreserveRecoveryAnchor` never replaces evidence (a conflicting or
 symbolic anchor fails closed and is never dereferenced). The credit exists so
 the sanctioned `sync --recover` -> rerun -> push loop cannot deadlock against
@@ -309,7 +314,7 @@ Everything lives under `~/.no-mistakes/` by default. Set `NM_HOME` to relocate i
 | `logs/daemon-bootstrap.log`      | Bounded pre-logger bootstrap and direct crash output                                                                    |
 | `logs/managed-server.log`        | Bounded stdout and stderr from daemon-managed Rovo Dev and OpenCode servers                                             |
 | `logs/wizard-agent.log`          | Managed agent-server output captured during setup wizard runs                                                           |
-| `logs/cli.log`                   | Caller attribution (PID, parent PID, parent command line) for `daemon stop`, `daemon restart`, and `update` invocations |
+| `logs/cli.log`                   | Caller attribution (PID, parent PID, parent executable name) for `daemon stop`, `daemon restart`, and `update` invocations |
 
 New repo IDs are the first 6 bytes (12 hex chars) of `sha256(absolute_working_path)`.
 When an initialized working repo is renamed or moved, `init` preserves the existing repo ID instead of deriving a new one from the new path.

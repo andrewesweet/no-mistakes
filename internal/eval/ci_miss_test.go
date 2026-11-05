@@ -196,15 +196,24 @@ func TestCIFalseNegativesFromRun_RequiresLandedRepairAndPassedChecks(t *testing.
 		repairSummary   string
 		checksPassed    bool
 		declaredNoCI    bool
+		status          types.RunStatus
 	}{
 		{name: "repair produced no published change", checksPassed: true},
 		{name: "repair landed but checks never passed", repairPublished: true, repairSummary: "fixed and published"},
 		{name: "no-CI declaration is not check evidence", repairPublished: true, repairSummary: "fixed and published", checksPassed: true, declaredNoCI: true},
+		{name: "handoff without published repair", checksPassed: true, status: types.RunHandedOff},
+		{name: "handoff before checks passed", repairPublished: true, status: types.RunHandedOff},
+		{name: "handoff with no-CI declaration", repairPublished: true, checksPassed: true, declaredNoCI: true, status: types.RunHandedOff},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			_, sourceDB, run, _ := setupRunWithCIRepairEvidence(t, ctx, `["ci-1"]`, "", tc.repairPublished, tc.repairSummary, tc.checksPassed, tc.declaredNoCI)
 			defer sourceDB.Close()
+			if tc.status != "" {
+				if err := sourceDB.UpdateRunStatus(run.ID, tc.status); err != nil {
+					t.Fatal(err)
+				}
+			}
 			gold, err := CIFalseNegativesFromRun(sourceDB, run.ID)
 			if err != nil {
 				t.Fatal(err)
@@ -213,6 +222,34 @@ func TestCIFalseNegativesFromRun_RequiresLandedRepairAndPassedChecks(t *testing.
 				t.Fatalf("gold = %#v, want none without both a landed repair and passed checks", gold)
 			}
 		})
+	}
+}
+
+func TestAutoIngestCIFalseNegatives_HandoffEligibility(t *testing.T) {
+	for _, status := range []types.RunStatus{types.RunChecksPassed, types.RunHandedOff} {
+		for _, override := range []string{"", "operator approved failing checks"} {
+			t.Run(string(status)+"/"+override, func(t *testing.T) {
+				ctx := context.Background()
+				p, sourceDB, run, greenRound := setupRunWithGreenReviewAndCI(t, ctx, `["ci-1","ci-2"]`, override)
+				defer sourceDB.Close()
+				if err := sourceDB.UpdateRunStatus(run.ID, status); err != nil {
+					t.Fatal(err)
+				}
+				result, skipped, err := AutoIngestCIFalseNegatives(ctx, p, sourceDB, run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if override != "" {
+					if !skipped || result.Added != 0 {
+						t.Fatalf("result=%+v skipped=%t, want overrides excluded", result, skipped)
+					}
+					return
+				}
+				if skipped || result.Added != 2 || result.CaseID != run.ID+"-"+greenRound.ID {
+					t.Fatalf("result=%+v skipped=%t, want both fixed code defects attached to the green review", result, skipped)
+				}
+			})
+		}
 	}
 }
 

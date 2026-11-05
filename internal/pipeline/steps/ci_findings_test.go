@@ -729,6 +729,61 @@ func TestCIStep_PublishedRepairResumesMonitoringAndWaitsForTheRerun(t *testing.T
 	}
 }
 
+func TestCIStep_HandoffPreservesPublishedRepairEvidence(t *testing.T) {
+	for _, cancelContext := range []bool{false, true} {
+		name := "readiness signal"
+		if cancelContext {
+			name = "context cancellation"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newCIRepairFixture(t, false, nil)
+			f.sctx.Agent.(*mockAgent).runFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				writeCIFix(opts.CWD)
+				return &agent.Result{Output: json.RawMessage(`{"summary":"repair the failing check","code_change_needed":true}`)}, nil
+			}
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(context.Canceled)
+			f.sctx.Ctx = ctx
+			f.sctx.SetCIReadiness = func(ready, _ bool) error {
+				if !ready {
+					return nil
+				}
+				if cancelContext {
+					cancel(pipeline.ErrHandoff)
+					return nil
+				}
+				return pipeline.ErrHandoff
+			}
+			step := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error {
+				f.sctx.Env = append(f.sctx.Env,
+					`FAKE_CLI_CHECKS=[{"name":"test","state":"SUCCESS","bucket":"pass"}]`,
+					"FAKE_CLI_PR_HEAD_SHA="+f.localHead(t))
+				return ctx.Err()
+			}}
+			outcome, err := driveCI(t, step, f.sctx)
+			wantErr := pipeline.ErrHandoff
+			if cancelContext {
+				wantErr = context.Canceled
+			}
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("handoff error=%v, want %v; log:\n%s", err, wantErr, f.log())
+			}
+			if outcome == nil || !outcome.RepairPublished || outcome.FixSummary != "repair the failing check" {
+				t.Fatalf("outcome=%+v, want the published repair evidence at handoff", outcome)
+			}
+			if f.remoteHead(t) == f.headSHA || f.remoteHead(t) != f.localHead(t) {
+				t.Fatal("repair evidence must describe a change published to upstream")
+			}
+			if calls := len(f.sctx.Agent.(*mockAgent).calls); calls != 1 {
+				t.Fatalf("agent calls=%d, want one repair", calls)
+			}
+			if outcome.Findings != "" {
+				t.Fatalf("findings=%q, want no stale CI failures", outcome.Findings)
+			}
+		})
+	}
+}
+
 // A transient check parks as ask-user, and when the human selects it and
 // answers fix, the round is told about that check.
 func TestCIStep_UserFixOfTransientFindingIsHonored(t *testing.T) {

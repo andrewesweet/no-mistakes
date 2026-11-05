@@ -131,10 +131,10 @@ func TestParseETime(t *testing.T) {
 	}
 }
 
-func TestParseProcessTableKeepsFullCommandLine(t *testing.T) {
-	out := "  501     1   501 2-10:01:33 /bin/bash /path/to/fm-remote-job-worker.sh  --flag  value\n" +
+func TestParseProcessTableKeepsExecutableName(t *testing.T) {
+	out := "  501     1   501 2-10:01:33 /path/to/my  worker\n" +
 		"bogus line\n" +
-		"  502   501   502       01:02 sleep 30\n"
+		"  502   501   502       01:02 sleep\n"
 	procs := parseProcessTable(out)
 	if len(procs) != 2 {
 		t.Fatalf("parseProcessTable returned %d entries: %+v", len(procs), procs)
@@ -145,12 +145,45 @@ func TestParseProcessTableKeepsFullCommandLine(t *testing.T) {
 	if want := 2*24*time.Hour + 10*time.Hour + time.Minute + 33*time.Second; procs[0].Elapsed != want {
 		t.Fatalf("Elapsed = %v, want %v", procs[0].Elapsed, want)
 	}
-	if want := "/bin/bash /path/to/fm-remote-job-worker.sh  --flag  value"; procs[0].Command != want {
+	if want := "/path/to/my  worker"; procs[0].Command != want {
 		t.Fatalf("Command = %q, want %q", procs[0].Command, want)
 	}
-	if procs[1].PID != 502 || procs[1].Command != "sleep 30" {
+	if procs[1].PID != 502 || procs[1].Command != "sleep" {
 		t.Fatalf("unexpected second entry: %+v", procs[1])
 	}
+}
+
+func TestListProcessesExcludesArguments(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "read release", "Authorization: Bearer diagnostic-secret")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		_ = cmd.Wait()
+	})
+	procs, err := listProcesses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, proc := range procs {
+		if proc.PID != cmd.Process.Pid {
+			continue
+		}
+		if !strings.Contains(proc.Command, "sh") {
+			t.Fatalf("command=%q, want executable name", proc.Command)
+		}
+		if strings.Contains(proc.Command, "Authorization") || strings.Contains(proc.Command, "diagnostic-secret") || strings.Contains(proc.Command, "read release") {
+			t.Fatalf("process arguments leaked: %q", proc.Command)
+		}
+		return
+	}
+	t.Fatal("live shell missing from process table")
 }
 
 func TestParseLsofCWDKeepsDeletedDirectories(t *testing.T) {
